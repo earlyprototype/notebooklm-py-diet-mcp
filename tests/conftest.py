@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -56,31 +56,35 @@ def make_mock_client():
     client = AsyncMock()
 
     # NotebooksAPI
-    client.notebooks.list = AsyncMock(return_value=[
-        FakeNotebook(id="nb-1", title="Research"),
-        FakeNotebook(id="nb-2", title="Strategy"),
-    ])
+    client.notebooks.list = AsyncMock(
+        return_value=[
+            FakeNotebook(id="nb-1", title="Research"),
+            FakeNotebook(id="nb-2", title="Strategy"),
+        ]
+    )
     client.notebooks.create = AsyncMock(return_value=FakeNotebook(id="nb-new", title="New Notebook"))
     client.notebooks.get = AsyncMock(return_value=FakeNotebook(id="nb-1", title="Research"))
     client.notebooks.delete = AsyncMock(return_value=None)
     client.notebooks.rename = AsyncMock(return_value=FakeNotebook(id="nb-1", title="Renamed"))
-    client.notebooks.get_description = AsyncMock(return_value=SimpleNamespace(
-        description="AI summary of notebook", suggested_topics=["topic1", "topic2"]
-    ))
+    client.notebooks.get_description = AsyncMock(
+        return_value=SimpleNamespace(description="AI summary of notebook", suggested_topics=["topic1", "topic2"])
+    )
     client.notebooks.get_summary = AsyncMock(return_value="Summary text of the notebook")
     client.notebooks.share = AsyncMock(return_value={"shared": True})
     client.notebooks.remove_from_recent = AsyncMock(return_value=None)
 
     # SourcesAPI
-    client.sources.list = AsyncMock(return_value=[
-        FakeSource(id="src-1", title="Wikipedia"),
-        FakeSource(id="src-2", title="Research Paper"),
-    ])
+    client.sources.list = AsyncMock(
+        return_value=[
+            FakeSource(id="src-1", title="Wikipedia"),
+            FakeSource(id="src-2", title="Research Paper"),
+        ]
+    )
     client.sources.get = AsyncMock(return_value=FakeSource(id="src-1", title="Wikipedia"))
     client.sources.get_fulltext = AsyncMock(return_value=SimpleNamespace(content="Full text content"))
-    client.sources.get_guide = AsyncMock(return_value=SimpleNamespace(
-        summary="Source guide summary", keywords=["key1", "key2"]
-    ))
+    client.sources.get_guide = AsyncMock(
+        return_value=SimpleNamespace(summary="Source guide summary", keywords=["key1", "key2"])
+    )
     client.sources.add_url = AsyncMock(return_value=FakeSource(id="src-new", title="Added URL"))
     client.sources.add_text = AsyncMock(return_value=FakeSource(id="src-text", title="Added Text"))
     client.sources.add_youtube = AsyncMock(return_value=FakeSource(id="src-yt", title="YouTube Video"))
@@ -91,20 +95,30 @@ def make_mock_client():
     client.sources.delete = AsyncMock(return_value=None)
 
     # ChatAPI
-    client.chat.ask = AsyncMock(return_value=FakeAnswer(
-        answer="The key findings are...", citations=["source1"]
-    ))
+    client.chat.ask = AsyncMock(return_value=FakeAnswer(answer="The key findings are...", citations=["source1"]))
     client.chat.configure = AsyncMock(return_value=None)
-    client.chat.get_history = AsyncMock(return_value=[
-        SimpleNamespace(role="user", content="What is this?"),
-        SimpleNamespace(role="assistant", content="This is the answer."),
-    ])
+    client.chat.get_history = AsyncMock(
+        return_value=[
+            SimpleNamespace(role="user", content="What is this?"),
+            SimpleNamespace(role="assistant", content="This is the answer."),
+        ]
+    )
 
     # ArtifactsAPI
-    for artifact in ("audio", "video", "report", "flashcards", "slide_deck",
-                     "infographic", "data_table", "mind_map", "quiz"):
-        setattr(client.artifacts, f"generate_{artifact}",
-                AsyncMock(return_value=FakeTaskStatus(task_id=f"task-{artifact}")))
+    for artifact in (
+        "audio",
+        "video",
+        "report",
+        "flashcards",
+        "slide_deck",
+        "infographic",
+        "data_table",
+        "mind_map",
+        "quiz",
+    ):
+        setattr(
+            client.artifacts, f"generate_{artifact}", AsyncMock(return_value=FakeTaskStatus(task_id=f"task-{artifact}"))
+        )
         setattr(client.artifacts, f"download_{artifact}", AsyncMock(return_value=None))
 
     client.artifacts.wait_for_completion = AsyncMock(return_value=None)
@@ -118,15 +132,15 @@ def make_mock_client():
 
     # ResearchAPI
     client.research.start = AsyncMock(return_value=SimpleNamespace(task_id="research-1"))
-    client.research.poll = AsyncMock(return_value=SimpleNamespace(
-        status="completed", results=["result1"]
-    ))
+    client.research.poll = AsyncMock(return_value=SimpleNamespace(status="completed", results=["result1"]))
     client.research.import_sources = AsyncMock(return_value={"imported": 2})
 
     # NotesAPI
-    client.notes.list = AsyncMock(return_value=[
-        FakeNote(id="note-1", title="Note 1", content="Content 1"),
-    ])
+    client.notes.list = AsyncMock(
+        return_value=[
+            FakeNote(id="note-1", title="Note 1", content="Content 1"),
+        ]
+    )
     client.notes.create = AsyncMock(return_value=FakeNote(id="note-new", title="New Note", content=""))
     client.notes.get = AsyncMock(return_value=FakeNote(id="note-1", title="Note 1", content="Content 1"))
     client.notes.update = AsyncMock(return_value=FakeNote(id="note-1", title="Updated", content="New content"))
@@ -135,9 +149,9 @@ def make_mock_client():
     client.notes.delete_mind_map = AsyncMock(return_value=None)
 
     # SharingAPI
-    client.sharing.get_status = AsyncMock(return_value=FakeSharingStatus(
-        is_public=False, view_level="private", users=[]
-    ))
+    client.sharing.get_status = AsyncMock(
+        return_value=FakeSharingStatus(is_public=False, view_level="private", users=[])
+    )
     client.sharing.set_public = AsyncMock(return_value=None)
     client.sharing.set_view_level = AsyncMock(return_value=None)
     client.sharing.add_user = AsyncMock(return_value=None)
@@ -162,6 +176,7 @@ def mock_client():
 def app_context(mock_client):
     """Provide an AppContext with a mocked client, ready for tool tests."""
     from notebooklm_mcp_server import AppContext
+
     return AppContext(client=mock_client, profile="test")
 
 

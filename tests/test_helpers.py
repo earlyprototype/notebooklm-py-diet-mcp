@@ -9,12 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from notebooklm_mcp_server import (
-    _resolve_profile_dir,
-    _read_active_profile,
-    _write_active_profile,
     _current_profile_name,
     _find_cli,
-    ACTIVE_PROFILE_PATH,
+    _read_active_profile,
+    _resolve_profile_dir,
+    _write_active_profile,
 )
 
 

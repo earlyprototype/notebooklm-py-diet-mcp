@@ -22,15 +22,14 @@ import json
 import os
 import subprocess
 import sys
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from notebooklm import NotebookLMClient
-
 
 ACTIVE_PROFILE_PATH = Path.home() / ".notebooklm-active.json"
 
@@ -91,6 +90,7 @@ def _current_profile_name() -> str:
 @dataclass
 class AppContext:
     """Application context with a switchable NotebookLM client."""
+
     client: NotebookLMClient | None
     profile: str
 
@@ -139,10 +139,8 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
             timeout=300,
         )
     except asyncio.TimeoutError:
-        try:
+        with suppress(Exception):
             process.kill()
-        except Exception:
-            pass
         return False
     except Exception:
         return False
@@ -152,14 +150,22 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
 
 
 async def _create_client(profile: str) -> NotebookLMClient:
-    """Create a NotebookLM client for the given profile.
+    """Create and initialise a NotebookLM client for the given profile.
+
+    The client is an async context manager that must be entered before
+    API calls will work. This function handles that automatically.
+    Callers are responsible for calling ``await client.close()`` when
+    the client is no longer needed.
 
     Raises ValueError if the stored session is expired or invalid.
     Callers that need a non-fatal path should catch the exception.
     """
     profile_dir = _resolve_profile_dir(profile)
     os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
-    return await NotebookLMClient.from_storage()
+    client = await NotebookLMClient.from_storage()
+    if hasattr(client, "__aenter__"):
+        await client.__aenter__()
+    return client
 
 
 async def _ensure_authenticated(
@@ -187,8 +193,7 @@ async def _ensure_authenticated(
     # Session is missing or expired -- attempt automatic re-authentication
     if app.client is None:
         await ctx.info(
-            "No credentials found. Launching browser for authentication -- "
-            "please sign into your Google account."
+            "No credentials found. Launching browser for authentication -- " "please sign into your Google account."
         )
     else:
         await ctx.info("Session expired. Launching browser for re-authentication...")
@@ -196,17 +201,14 @@ async def _ensure_authenticated(
     success = await _run_login(app.profile, ctx)
     if not success:
         await ctx.error(
-            "Automatic re-authentication failed. "
-            "Please run 'notebooklm login' manually in your terminal."
+            "Automatic re-authentication failed. " "Please run 'notebooklm login' manually in your terminal."
         )
         return False
 
     # Close old client if one exists
     if app.client is not None:
-        try:
-            await app.client.close()
-        except Exception:
-            pass
+        with suppress(Exception):
+            await app.client.__aexit__(None, None, None)
 
     app.client = await _create_client(app.profile)
     await ctx.info("Authentication successful. Resuming operation.")
@@ -242,22 +244,18 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         yield ctx
     finally:
         if ctx.client is not None:
-            try:
-                await ctx.client.close()
-            except Exception:
-                pass
+            with suppress(Exception):
+                await ctx.client.__aexit__(None, None, None)
 
 
 # Initialise FastMCP server with lifespan
-mcp = FastMCP(
-    "NotebookLM",
-    lifespan=app_lifespan
-)
+mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
 
 
 # ============================================================================
 # RESOURCES - Read-only data access
 # ============================================================================
+
 
 @mcp.resource("notebooklm://notebooks")
 async def list_notebooks(ctx: Context[ServerSession, AppContext]) -> str:
@@ -326,39 +324,31 @@ async def get_notebook_info(notebook_id: str, ctx: Context[ServerSession, AppCon
 # TOOLS - Executable actions
 # ============================================================================
 
+
 @mcp.tool()
 async def list_notebooks_tool(ctx: Context[ServerSession, AppContext]) -> dict:
     """List all NotebookLM notebooks.
-    
+
     Returns a dictionary with notebook titles and IDs.
     """
     app = ctx.request_context.lifespan_context
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info("Fetching notebooks...")
     notebooks = await client.notebooks.list()
-    
-    return {
-        "count": len(notebooks),
-        "notebooks": [
-            {"id": nb.id, "title": nb.title}
-            for nb in notebooks
-        ]
-    }
+
+    return {"count": len(notebooks), "notebooks": [{"id": nb.id, "title": nb.title} for nb in notebooks]}
 
 
 @mcp.tool()
-async def create_notebook(
-    title: str,
-    ctx: Context[ServerSession, AppContext]
-) -> dict:
+async def create_notebook(title: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Create a new NotebookLM notebook.
-    
+
     Args:
         title: Title for the new notebook
-        
+
     Returns:
         Dictionary with notebook ID and title
     """
@@ -366,31 +356,24 @@ async def create_notebook(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Creating notebook: {title}")
     notebook = await client.notebooks.create(title)
-    
-    return {
-        "id": notebook.id,
-        "title": notebook.title,
-        "success": True
-    }
+
+    return {"id": notebook.id, "title": notebook.title, "success": True}
 
 
 @mcp.tool()
 async def add_source_url(
-    notebook_id: str,
-    url: str,
-    wait: bool = True,
-    ctx: Context[ServerSession, AppContext] = None
+    notebook_id: str, url: str, wait: bool = True, ctx: Context[ServerSession, AppContext] = None
 ) -> dict:
     """Add a URL as a source to a notebook.
-    
+
     Args:
         notebook_id: ID of the notebook
         url: URL to add as a source
         wait: Whether to wait for processing to complete
-        
+
     Returns:
         Dictionary with source details
     """
@@ -398,35 +381,26 @@ async def add_source_url(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Adding URL source: {url}")
     await ctx.report_progress(0.3, 1.0, "Processing URL...")
-    
+
     source = await client.sources.add_url(notebook_id, url, wait=wait)
-    
+
     await ctx.report_progress(1.0, 1.0, "Complete")
-    
-    return {
-        "id": source.id,
-        "title": source.title,
-        "success": True
-    }
+
+    return {"id": source.id, "title": source.title, "success": True}
 
 
 @mcp.tool()
-async def add_source_text(
-    notebook_id: str,
-    text: str,
-    title: str,
-    ctx: Context[ServerSession, AppContext]
-) -> dict:
+async def add_source_text(notebook_id: str, text: str, title: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Add text content as a source to a notebook.
-    
+
     Args:
         notebook_id: ID of the notebook
         text: Text content to add
         title: Title for the source
-        
+
     Returns:
         Dictionary with source details
     """
@@ -434,15 +408,11 @@ async def add_source_text(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Adding text source: {title}")
     source = await client.sources.add_text(notebook_id, text, title=title)
-    
-    return {
-        "id": source.id,
-        "title": source.title,
-        "success": True
-    }
+
+    return {"id": source.id, "title": source.title, "success": True}
 
 
 @mcp.tool()
@@ -919,8 +889,7 @@ async def get_chat_history(
     return {
         "count": len(history),
         "messages": [
-            {"role": getattr(m, "role", "unknown"), "content": getattr(m, "content", str(m))}
-            for m in history
+            {"role": getattr(m, "role", "unknown"), "content": getattr(m, "content", str(m))} for m in history
         ],
     }
 
@@ -931,16 +900,16 @@ async def generate_audio_overview(
     instructions: str = "",
     audio_format: str = "deep-dive",
     length: str = "medium",
-    ctx: Context[ServerSession, AppContext] = None
+    ctx: Context[ServerSession, AppContext] = None,
 ) -> dict:
     """Generate an audio overview (podcast) from notebook sources.
-    
+
     Args:
         notebook_id: ID of the notebook
         instructions: Custom instructions for generation
         audio_format: Format type (deep-dive, brief, critique, debate)
         length: Length (short, medium, long)
-        
+
     Returns:
         Dictionary with task status
     """
@@ -948,42 +917,30 @@ async def generate_audio_overview(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Generating audio overview: {audio_format} ({length})")
     await ctx.report_progress(0.2, 1.0, "Starting generation...")
-    
+
     status = await client.artifacts.generate_audio(
-        notebook_id,
-        instructions=instructions,
-        format=audio_format,
-        length=length
+        notebook_id, instructions=instructions, format=audio_format, length=length
     )
-    
+
     await ctx.report_progress(0.5, 1.0, "Waiting for generation to complete...")
     await client.artifacts.wait_for_completion(notebook_id, status.task_id)
-    
+
     await ctx.report_progress(1.0, 1.0, "Audio generation complete")
-    
-    return {
-        "task_id": status.task_id,
-        "status": "completed",
-        "format": audio_format,
-        "length": length
-    }
+
+    return {"task_id": status.task_id, "status": "completed", "format": audio_format, "length": length}
 
 
 @mcp.tool()
-async def download_audio(
-    notebook_id: str,
-    output_path: str,
-    ctx: Context[ServerSession, AppContext]
-) -> dict:
+async def download_audio(notebook_id: str, output_path: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Download the generated audio overview to a file.
-    
+
     Args:
         notebook_id: ID of the notebook
         output_path: Path where to save the audio file
-        
+
     Returns:
         Dictionary with download status
     """
@@ -991,18 +948,15 @@ async def download_audio(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Downloading audio to: {output_path}")
     await ctx.report_progress(0.5, 1.0, "Downloading...")
-    
+
     await client.artifacts.download_audio(notebook_id, output_path)
-    
+
     await ctx.report_progress(1.0, 1.0, "Download complete")
-    
-    return {
-        "output_path": output_path,
-        "success": True
-    }
+
+    return {"output_path": output_path, "success": True}
 
 
 @mcp.tool()
@@ -1010,15 +964,15 @@ async def generate_quiz(
     notebook_id: str,
     quantity: str = "standard",
     difficulty: str = "medium",
-    ctx: Context[ServerSession, AppContext] = None
+    ctx: Context[ServerSession, AppContext] = None,
 ) -> dict:
     """Generate a quiz from notebook sources.
-    
+
     Args:
         notebook_id: ID of the notebook
         quantity: Number of questions (few, standard, more)
         difficulty: Difficulty level (easy, medium, hard)
-        
+
     Returns:
         Dictionary with task status
     """
@@ -1026,43 +980,31 @@ async def generate_quiz(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Generating quiz: {difficulty} difficulty, {quantity} questions")
     await ctx.report_progress(0.3, 1.0, "Starting generation...")
-    
-    status = await client.artifacts.generate_quiz(
-        notebook_id,
-        quantity=quantity,
-        difficulty=difficulty
-    )
-    
+
+    status = await client.artifacts.generate_quiz(notebook_id, quantity=quantity, difficulty=difficulty)
+
     await ctx.report_progress(0.7, 1.0, "Waiting for completion...")
     await client.artifacts.wait_for_completion(notebook_id, status.task_id)
-    
+
     await ctx.report_progress(1.0, 1.0, "Quiz generation complete")
-    
-    return {
-        "task_id": status.task_id,
-        "status": "completed",
-        "quantity": quantity,
-        "difficulty": difficulty
-    }
+
+    return {"task_id": status.task_id, "status": "completed", "quantity": quantity, "difficulty": difficulty}
 
 
 @mcp.tool()
 async def download_quiz(
-    notebook_id: str,
-    output_path: str,
-    output_format: str = "json",
-    ctx: Context[ServerSession, AppContext] = None
+    notebook_id: str, output_path: str, output_format: str = "json", ctx: Context[ServerSession, AppContext] = None
 ) -> dict:
     """Download the generated quiz to a file.
-    
+
     Args:
         notebook_id: ID of the notebook
         output_path: Path where to save the quiz file
         output_format: Format (json, markdown, html)
-        
+
     Returns:
         Dictionary with download status
     """
@@ -1070,24 +1012,21 @@ async def download_quiz(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
     client = app.client
-    
+
     await ctx.info(f"Downloading quiz as {output_format} to: {output_path}")
     await ctx.report_progress(0.5, 1.0, "Downloading...")
-    
+
     await client.artifacts.download_quiz(notebook_id, output_path, output_format=output_format)
-    
+
     await ctx.report_progress(1.0, 1.0, "Download complete")
-    
-    return {
-        "output_path": output_path,
-        "format": output_format,
-        "success": True
-    }
+
+    return {"output_path": output_path, "format": output_format, "success": True}
 
 
 # ============================================================================
 # ARTIFACTS -- additional generation and download tools
 # ============================================================================
+
 
 @mcp.tool()
 async def generate_video(
@@ -1429,6 +1368,7 @@ async def download_mind_map(
 # ARTIFACTS -- management tools
 # ============================================================================
 
+
 @mcp.tool()
 async def list_artifacts(
     notebook_id: str,
@@ -1453,10 +1393,7 @@ async def list_artifacts(
     artifacts = await app.client.artifacts.list(notebook_id, artifact_type or None)
     return {
         "count": len(artifacts),
-        "artifacts": [
-            {"id": getattr(a, "id", str(a)), "title": getattr(a, "title", "")}
-            for a in artifacts
-        ],
+        "artifacts": [{"id": getattr(a, "id", str(a)), "title": getattr(a, "title", "")} for a in artifacts],
     }
 
 
@@ -1566,9 +1503,7 @@ async def export_artifact(
         return {"error": "Authentication failed. Please check the logs."}
 
     await ctx.info(f"Exporting artifact to: {output_path}")
-    data = await app.client.artifacts.export(
-        notebook_id, artifact_id, export_format or None
-    )
+    data = await app.client.artifacts.export(notebook_id, artifact_id, export_format or None)
     Path(output_path).write_bytes(data if isinstance(data, bytes) else str(data).encode("utf-8"))
     return {"output_path": output_path, "success": True}
 
@@ -1576,6 +1511,7 @@ async def export_artifact(
 # ============================================================================
 # RESEARCH -- web and Drive research with auto-import
 # ============================================================================
+
 
 @mcp.tool()
 async def start_research(
@@ -1662,6 +1598,7 @@ async def import_research_sources(
 # NOTES -- notebook notes and mind maps
 # ============================================================================
 
+
 @mcp.tool()
 async def list_notes(
     notebook_id: str,
@@ -1682,10 +1619,7 @@ async def list_notes(
     notes = await app.client.notes.list(notebook_id)
     return {
         "count": len(notes),
-        "notes": [
-            {"id": n.id, "title": n.title}
-            for n in notes
-        ],
+        "notes": [{"id": n.id, "title": n.title} for n in notes],
     }
 
 
@@ -1813,10 +1747,7 @@ async def list_mind_maps(
     mind_maps = await app.client.notes.list_mind_maps(notebook_id)
     return {
         "count": len(mind_maps),
-        "mind_maps": [
-            {"id": getattr(m, "id", str(m)), "title": getattr(m, "title", "")}
-            for m in mind_maps
-        ],
+        "mind_maps": [{"id": getattr(m, "id", str(m)), "title": getattr(m, "title", "")} for m in mind_maps],
     }
 
 
@@ -1846,6 +1777,7 @@ async def delete_mind_map(
 # ============================================================================
 # SHARING -- notebook access and permissions
 # ============================================================================
+
 
 @mcp.tool()
 async def get_sharing_status(
@@ -1999,6 +1931,7 @@ async def remove_shared_user(
 # SETTINGS -- output language preferences
 # ============================================================================
 
+
 @mcp.tool()
 async def get_output_language(
     ctx: Context[ServerSession, AppContext] = None,
@@ -2040,6 +1973,7 @@ async def set_output_language(
 # ============================================================================
 # ACCOUNT MANAGEMENT
 # ============================================================================
+
 
 @mcp.tool()
 async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
@@ -2109,10 +2043,7 @@ async def switch_account(
         return {
             "success": False,
             "error": f"No credentials found for profile '{profile}' at {target_dir}",
-            "hint": (
-                f"Authenticate first by running:\n"
-                f"  NOTEBOOKLM_HOME={target_dir} notebooklm login"
-            ),
+            "hint": (f"Authenticate first by running:\n" f"  NOTEBOOKLM_HOME={target_dir} notebooklm login"),
         }
 
     previous = app.profile
@@ -2120,10 +2051,8 @@ async def switch_account(
     # Close existing client
     await ctx.info(f"Switching from '{previous}' to '{profile}'...")
     if app.client is not None:
-        try:
-            await app.client.close()
-        except Exception:
-            pass
+        with suppress(Exception):
+            await app.client.__aexit__(None, None, None)
 
     # Create new client for the target profile
     app.client = await _create_client(profile)
@@ -2188,8 +2117,7 @@ async def create_profile(
         "profile": profile,
         "config_path": str(target_dir),
         "next_step": (
-            f"Profile '{profile}' is ready. "
-            f"Use switch_account with profile='{profile}' to start using it."
+            f"Profile '{profile}' is ready. " f"Use switch_account with profile='{profile}' to start using it."
         ),
     }
 
@@ -2198,14 +2126,15 @@ async def create_profile(
 # PROMPTS - Reusable templates
 # ============================================================================
 
+
 @mcp.prompt()
 def analyze_notebook_sources(notebook_id: str, focus_area: str = "main themes") -> str:
     """Generate a prompt for analyzing notebook sources.
-    
+
     Args:
         notebook_id: ID of the notebook to analyze
         focus_area: What to focus on in the analysis
-        
+
     Returns:
         Formatted prompt for analysis
     """
@@ -2225,11 +2154,11 @@ Use the NotebookLM MCP tools to query the notebook for specific information."""
 @mcp.prompt()
 def research_topic_workflow(topic: str, depth: str = "comprehensive") -> str:
     """Generate a prompt for researching a topic using NotebookLM.
-    
+
     Args:
         topic: Topic to research
         depth: Level of depth (quick, standard, comprehensive)
-        
+
     Returns:
         Formatted workflow prompt
     """
@@ -2257,5 +2186,5 @@ if __name__ == "__main__":
     transport = "stdio"
     if len(sys.argv) > 1 and sys.argv[1] == "--http":
         transport = "streamable-http"
-    
+
     mcp.run(transport=transport)

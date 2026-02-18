@@ -4,93 +4,89 @@ Each test verifies that the tool calls the correct SDK method with the
 expected arguments and returns a well-structured result dict.
 """
 
-import pytest
-
 from notebooklm_mcp_server import (
-    # Notebooks
-    list_notebooks_tool,
-    create_notebook,
-    get_notebook,
-    delete_notebook,
-    rename_notebook,
-    get_notebook_description,
-    get_notebook_summary,
-    share_notebook,
-    remove_notebook_from_recent,
+    add_shared_user,
+    add_source_drive,
+    add_source_file,
+    add_source_text,
     # Sources
     add_source_url,
-    add_source_text,
-    get_source,
-    get_source_fulltext,
-    get_source_guide,
     add_source_youtube,
-    add_source_file,
-    add_source_drive,
-    rename_source,
-    refresh_source,
-    delete_source,
     # Chat
     ask_question,
     configure_chat,
-    get_chat_history,
-    # Artifacts -- generation
-    generate_audio_overview,
-    generate_video,
-    generate_report,
-    generate_quiz,
-    generate_flashcards,
-    generate_slide_deck,
-    generate_infographic,
-    generate_data_table,
-    generate_mind_map,
+    create_note,
+    create_notebook,
+    delete_artifact,
+    delete_mind_map,
+    delete_note,
+    delete_notebook,
+    delete_source,
     # Artifacts -- download
     download_audio,
-    download_video,
-    download_report,
-    download_quiz,
-    download_flashcards,
-    download_slide_deck,
-    download_infographic,
     download_data_table,
+    download_flashcards,
+    download_infographic,
     download_mind_map,
-    # Artifacts -- management
-    list_artifacts,
-    get_artifact,
-    delete_artifact,
-    rename_artifact,
+    download_quiz,
+    download_report,
+    download_slide_deck,
+    download_video,
     export_artifact,
-    # Research
-    start_research,
-    poll_research,
-    import_research_sources,
-    # Notes
-    list_notes,
-    create_note,
-    get_note,
-    update_note,
-    delete_note,
-    list_mind_maps,
-    delete_mind_map,
-    # Sharing
-    get_sharing_status,
-    set_notebook_public,
-    set_notebook_view_level,
-    add_shared_user,
-    update_shared_user,
-    remove_shared_user,
-    # Settings
-    get_output_language,
-    set_output_language,
+    # Artifacts -- generation
+    generate_audio_overview,
+    generate_data_table,
+    generate_flashcards,
+    generate_infographic,
+    generate_mind_map,
+    generate_quiz,
+    generate_report,
+    generate_slide_deck,
+    generate_video,
     # Account
     get_account_info,
-    switch_account,
-    create_profile,
+    get_artifact,
+    get_chat_history,
+    get_note,
+    get_notebook,
+    get_notebook_description,
+    get_notebook_summary,
+    # Settings
+    get_output_language,
+    # Sharing
+    get_sharing_status,
+    get_source,
+    get_source_fulltext,
+    get_source_guide,
+    import_research_sources,
+    # Artifacts -- management
+    list_artifacts,
+    list_mind_maps,
+    # Notebooks
+    list_notebooks_tool,
+    # Notes
+    list_notes,
+    poll_research,
+    refresh_source,
+    remove_notebook_from_recent,
+    remove_shared_user,
+    rename_artifact,
+    rename_notebook,
+    rename_source,
+    set_notebook_public,
+    set_notebook_view_level,
+    set_output_language,
+    share_notebook,
+    # Research
+    start_research,
+    update_note,
+    update_shared_user,
 )
-
 
 # ============================================================================
 # NOTEBOOKS
 # ============================================================================
+
 
 class TestListNotebooks:
     async def test_returns_notebook_list(self, mock_ctx, mock_client):
@@ -169,6 +165,7 @@ class TestRemoveNotebookFromRecent:
 # ============================================================================
 # SOURCES
 # ============================================================================
+
 
 class TestAddSourceUrl:
     async def test_adds_url_source(self, mock_ctx, mock_client):
@@ -256,6 +253,7 @@ class TestDeleteSource:
 # CHAT
 # ============================================================================
 
+
 class TestAskQuestion:
     async def test_returns_answer(self, mock_ctx, mock_client):
         result = await ask_question("nb-1", "What are the findings?", ctx=mock_ctx)
@@ -288,6 +286,7 @@ class TestGetChatHistory:
 # ============================================================================
 # ARTIFACTS -- generation
 # ============================================================================
+
 
 class TestGenerateAudioOverview:
     async def test_generates_audio(self, mock_ctx, mock_client):
@@ -357,6 +356,7 @@ class TestGenerateMindMap:
 # ARTIFACTS -- download
 # ============================================================================
 
+
 class TestDownloadAudio:
     async def test_downloads_audio(self, mock_ctx, mock_client):
         result = await download_audio("nb-1", "/tmp/audio.mp3", mock_ctx)
@@ -382,9 +382,7 @@ class TestDownloadQuiz:
     async def test_downloads_quiz(self, mock_ctx, mock_client):
         result = await download_quiz("nb-1", "/tmp/quiz.json", "json", mock_ctx)
         assert result["success"] is True
-        mock_client.artifacts.download_quiz.assert_awaited_once_with(
-            "nb-1", "/tmp/quiz.json", output_format="json"
-        )
+        mock_client.artifacts.download_quiz.assert_awaited_once_with("nb-1", "/tmp/quiz.json", output_format="json")
 
 
 class TestDownloadFlashcards:
@@ -426,6 +424,7 @@ class TestDownloadMindMap:
 # ARTIFACTS -- management
 # ============================================================================
 
+
 class TestListArtifacts:
     async def test_lists_artifacts(self, mock_ctx, mock_client):
         result = await list_artifacts("nb-1", ctx=mock_ctx)
@@ -466,6 +465,7 @@ class TestExportArtifact:
 # RESEARCH
 # ============================================================================
 
+
 class TestStartResearch:
     async def test_starts_research(self, mock_ctx, mock_client):
         result = await start_research("nb-1", "digital twins", ctx=mock_ctx)
@@ -491,6 +491,7 @@ class TestImportResearchSources:
 # ============================================================================
 # NOTES
 # ============================================================================
+
 
 class TestListNotes:
     async def test_lists_notes(self, mock_ctx, mock_client):
@@ -549,6 +550,7 @@ class TestDeleteMindMap:
 # SHARING
 # ============================================================================
 
+
 class TestGetSharingStatus:
     async def test_gets_status(self, mock_ctx, mock_client):
         result = await get_sharing_status("nb-1", ctx=mock_ctx)
@@ -600,6 +602,7 @@ class TestRemoveSharedUser:
 # SETTINGS
 # ============================================================================
 
+
 class TestGetOutputLanguage:
     async def test_gets_language(self, mock_ctx, mock_client):
         result = await get_output_language(ctx=mock_ctx)
@@ -618,6 +621,7 @@ class TestSetOutputLanguage:
 # ============================================================================
 # ACCOUNT MANAGEMENT
 # ============================================================================
+
 
 class TestGetAccountInfo:
     async def test_returns_account_details(self, mock_ctx, app_context):

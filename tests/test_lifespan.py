@@ -4,12 +4,9 @@ Verifies behaviour with valid credentials, expired credentials,
 and missing credentials -- all mocked, no network access.
 """
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from notebooklm_mcp_server import app_lifespan, AppContext
+from notebooklm_mcp_server import AppContext, app_lifespan
 
 
 class TestLifespanValidCredentials:
@@ -19,7 +16,6 @@ class TestLifespanValidCredentials:
         (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
 
         mock_client = AsyncMock()
-        mock_client.close = AsyncMock()
 
         server = MagicMock()
 
@@ -34,7 +30,7 @@ class TestLifespanValidCredentials:
                 assert ctx.profile == "personal"
                 mock_create.assert_awaited_once_with("personal")
 
-            mock_client.close.assert_awaited_once()
+            mock_client.__aexit__.assert_awaited_once()
 
 
 class TestLifespanExpiredCredentials:
