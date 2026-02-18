@@ -134,7 +134,7 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(
+        _stdout, _stderr = await asyncio.wait_for(
             asyncio.get_event_loop().run_in_executor(None, process.communicate),
             timeout=300,
         )
@@ -193,16 +193,14 @@ async def _ensure_authenticated(
     # Session is missing or expired -- attempt automatic re-authentication
     if app.client is None:
         await ctx.info(
-            "No credentials found. Launching browser for authentication -- " "please sign into your Google account."
+            "No credentials found. Launching browser for authentication -- please sign into your Google account."
         )
     else:
         await ctx.info("Session expired. Launching browser for re-authentication...")
 
     success = await _run_login(app.profile, ctx)
     if not success:
-        await ctx.error(
-            "Automatic re-authentication failed. " "Please run 'notebooklm login' manually in your terminal."
-        )
+        await ctx.error("Automatic re-authentication failed. Please run 'notebooklm login' manually in your terminal.")
         return False
 
     # Close old client if one exists
@@ -2043,7 +2041,7 @@ async def switch_account(
         return {
             "success": False,
             "error": f"No credentials found for profile '{profile}' at {target_dir}",
-            "hint": (f"Authenticate first by running:\n" f"  NOTEBOOKLM_HOME={target_dir} notebooklm login"),
+            "hint": (f"Authenticate first by running:\n  NOTEBOOKLM_HOME={target_dir} notebooklm login"),
         }
 
     previous = app.profile
@@ -2116,9 +2114,7 @@ async def create_profile(
         "success": True,
         "profile": profile,
         "config_path": str(target_dir),
-        "next_step": (
-            f"Profile '{profile}' is ready. " f"Use switch_account with profile='{profile}' to start using it."
-        ),
+        "next_step": (f"Profile '{profile}' is ready. Use switch_account with profile='{profile}' to start using it."),
     }
 
 
