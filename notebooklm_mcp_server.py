@@ -2119,6 +2119,123 @@ async def create_profile(
 
 
 # ============================================================================
+# UTILITY -- PDF / PNG conversion tools
+# ============================================================================
+
+
+@mcp.tool()
+async def pdf_to_png(
+    pdf_path: str,
+    output_directory: str = "",
+    dpi: int = 200,
+) -> dict:
+    """Convert a PDF file to individual PNG images (one per page).
+
+    Useful for making slide deck pages visible to LLMs for review or editing.
+
+    Args:
+        pdf_path: Path to the source PDF file
+        output_directory: Directory to write PNGs into. Defaults to a folder
+            beside the PDF named <filename>_pages/
+        dpi: Render resolution (default 200 -- good balance of quality and size)
+
+    Returns:
+        Dictionary with output directory, list of page image paths, and page count
+    """
+    import fitz  # pymupdf
+
+    pdf = Path(pdf_path)
+    if not pdf.is_file():
+        return {"error": f"PDF not found: {pdf_path}"}
+
+    out_dir = Path(output_directory) if output_directory else pdf.parent / f"{pdf.stem}_pages"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    doc = fitz.open(str(pdf))
+    zoom = dpi / 72
+    matrix = fitz.Matrix(zoom, zoom)
+    pages: list[str] = []
+
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(matrix=matrix)
+        out_file = out_dir / f"page_{i + 1:03d}.png"
+        pix.save(str(out_file))
+        pages.append(str(out_file))
+
+    doc.close()
+
+    return {
+        "output_directory": str(out_dir),
+        "pages": pages,
+        "page_count": len(pages),
+        "dpi": dpi,
+        "success": True,
+    }
+
+
+@mcp.tool()
+async def png_to_pdf(
+    image_paths: list[str] | None = None,
+    image_directory: str = "",
+    output_path: str = "",
+) -> dict:
+    """Combine PNG images into a single PDF document.
+
+    Provide either a list of image paths or a directory containing PNGs.
+    When using a directory, images are sorted alphabetically (the naming
+    convention from pdf_to_png -- page_001.png, page_002.png, etc. --
+    preserves correct order automatically).
+
+    Args:
+        image_paths: Explicit ordered list of image file paths
+        image_directory: Directory of PNG files to combine (alternative to image_paths)
+        output_path: Path for the output PDF. Defaults to <directory>/combined.pdf
+
+    Returns:
+        Dictionary with the output PDF path and page count
+    """
+    import fitz  # pymupdf
+
+    if image_paths:
+        files = [Path(p) for p in image_paths]
+    elif image_directory:
+        src = Path(image_directory)
+        if not src.is_dir():
+            return {"error": f"Directory not found: {image_directory}"}
+        files = sorted(src.glob("*.png"))
+    else:
+        return {"error": "Provide either image_paths or image_directory"}
+
+    if not files:
+        return {"error": "No PNG files found"}
+
+    missing = [str(f) for f in files if not f.is_file()]
+    if missing:
+        return {"error": f"Files not found: {', '.join(missing)}"}
+
+    doc = fitz.open()
+    for img_path in files:
+        img_doc = fitz.open(str(img_path))
+        rect = img_doc[0].rect
+        pdf_bytes = img_doc.convert_to_pdf()
+        img_doc.close()
+        img_pdf = fitz.open("pdf", pdf_bytes)
+        page = doc.new_page(width=rect.width, height=rect.height)
+        page.show_pdf_page(page.rect, img_pdf, 0)
+        img_pdf.close()
+
+    out = Path(output_path) if output_path else (files[0].parent / "combined.pdf")
+    doc.save(str(out))
+    doc.close()
+
+    return {
+        "output_path": str(out),
+        "page_count": len(files),
+        "success": True,
+    }
+
+
+# ============================================================================
 # PROMPTS - Reusable templates
 # ============================================================================
 

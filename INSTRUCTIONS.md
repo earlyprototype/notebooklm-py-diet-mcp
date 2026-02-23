@@ -39,6 +39,16 @@ IMPORTANT - Content generation:
 10. Always generate before downloading -- download tools retrieve the most recently generated artifact
 11. Generation is a two-step process: generate -> download
 12. Use list_artifacts to see previously generated artifacts; get_artifact, rename_artifact, delete_artifact, and export_artifact for management
+13. Download file formats -- use the correct file extension in the output_path:
+    - download_slide_deck: PDF (.pdf)
+    - download_audio: WAV (.wav)
+    - download_video: MP4 (.mp4)
+    - download_report: PDF (.pdf)
+    - download_infographic: PDF (.pdf)
+    - download_quiz: depends on output_format param (json, markdown, html)
+    - download_flashcards: PDF (.pdf)
+    - download_data_table: PDF (.pdf)
+    - download_mind_map: PDF (.pdf)
 
 IMPORTANT - Adding sources:
 - add_source_url: For web pages, articles, Wikipedia, YouTube links
@@ -85,6 +95,11 @@ ERROR HANDLING:
 - If notebooks return empty, confirm the correct account is active using get_account_info
 - Network timeouts on generation tools are normal for long content -- retry once before reporting failure
 - Destructive operations (delete_notebook, delete_source, delete_note, delete_artifact, delete_mind_map) cannot be undone -- always confirm with the user first
+
+IMPORTANT - PDF / PNG conversion utilities:
+- pdf_to_png: Converts a PDF into individual PNG images (one per page). Use this to make slide deck pages visible to LLMs for visual review or editing. Default DPI of 200 balances quality and file size; increase for higher fidelity if needed. Output goes to a <filename>_pages/ folder beside the PDF by default.
+- png_to_pdf: Combines PNG images back into a single PDF. Accepts either an explicit list of image paths or a directory of PNGs. When using a directory, files are sorted alphabetically -- the page_001.png naming from pdf_to_png preserves correct page order automatically.
+- Typical round-trip workflow: download_slide_deck (.pdf) -> pdf_to_png -> LLM reviews/edits images -> png_to_pdf -> final PDF
 
 STYLE:
 - Present NotebookLM answers in a clear, readable format
