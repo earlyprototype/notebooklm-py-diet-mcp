@@ -93,6 +93,7 @@ def make_mock_client():
     client.sources.rename = AsyncMock(return_value=FakeSource(id="src-1", title="Renamed Source"))
     client.sources.refresh = AsyncMock(return_value=FakeSource(id="src-1", title="Refreshed Source"))
     client.sources.delete = AsyncMock(return_value=None)
+    client.sources.check_freshness = AsyncMock(return_value=True)
 
     # ChatAPI
     client.chat.ask = AsyncMock(return_value=FakeAnswer(answer="The key findings are...", citations=["source1"]))
@@ -129,6 +130,19 @@ def make_mock_client():
     client.artifacts.export = AsyncMock(return_value=b"exported-data")
     client.artifacts.export_report = AsyncMock(return_value=b"report-data")
     client.artifacts.export_data_table = AsyncMock(return_value=b"table-data")
+    client.artifacts.suggest_reports = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                title="Executive Summary", description="High-level overview", prompt="Summarise", audience_level=2
+            ),
+            SimpleNamespace(
+                title="Technical Deep Dive",
+                description="Detailed analysis",
+                prompt="Analyse in depth",
+                audience_level=3,
+            ),
+        ]
+    )
 
     # ResearchAPI
     client.research.start = AsyncMock(return_value=SimpleNamespace(task_id="research-1"))

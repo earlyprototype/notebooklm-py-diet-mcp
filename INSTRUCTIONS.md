@@ -36,10 +36,11 @@ IMPORTANT - Content generation:
 7. generate_infographic: Creates a visual infographic
 8. generate_data_table: Creates a structured data table
 9. generate_mind_map: Creates a mind map from sources
-10. Always generate before downloading -- download tools retrieve the most recently generated artifact
-11. Generation is a two-step process: generate -> download
-12. Use list_artifacts to see previously generated artifacts; get_artifact, rename_artifact, delete_artifact, and export_artifact for management
-13. Download file formats -- use the correct file extension in the output_path:
+10. suggest_reports: Returns AI-suggested report formats tailored to the notebook's content, each with a title, description, and prompt that can be passed directly to generate_report
+11. Always generate before downloading -- download tools retrieve the most recently generated artifact
+12. Generation is a two-step process: generate -> download
+13. Use list_artifacts to see previously generated artifacts; get_artifact, rename_artifact, delete_artifact, and export_artifact for management
+14. Download file formats -- use the correct file extension in the output_path:
     - download_slide_deck: PDF (.pdf)
     - download_audio: WAV (.wav)
     - download_video: MP4 (.mp4)
@@ -49,6 +50,10 @@ IMPORTANT - Content generation:
     - download_flashcards: PDF (.pdf)
     - download_data_table: PDF (.pdf)
     - download_mind_map: PDF (.pdf)
+
+IMPORTANT - Source management:
+- list_sources: Lists all sources in a notebook with IDs, titles, type, and processing status
+- check_source_freshness: Checks if a URL or Drive source needs re-indexing. Use before refresh_source to avoid unnecessary re-processing. Returns is_fresh (true/false) and needs_refresh (true/false)
 
 IMPORTANT - Adding sources:
 - add_source_url: For web pages, articles, Wikipedia, YouTube links

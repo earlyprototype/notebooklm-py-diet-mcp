@@ -11,7 +11,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 
 ## Features
 
-### MCP Tools (69)
+### MCP Tools (72)
 
 #### Notebooks (9)
 
@@ -27,10 +27,11 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 | `share_notebook` | Update sharing settings |
 | `remove_notebook_from_recent` | Remove from the recent notebooks list |
 
-#### Sources (11)
+#### Sources (13)
 
 | Tool | Description |
 |------|-------------|
+| `list_sources` | List all sources in a notebook with IDs, titles, and status |
 | `add_source_url` | Add a URL as a source (web pages, articles, YouTube) |
 | `add_source_text` | Add text content as a source |
 | `add_source_youtube` | Add a YouTube video as a source |
@@ -40,6 +41,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 | `get_source_fulltext` | Get the full indexed text content of a source |
 | `get_source_guide` | Get AI-generated source guide (summary + keywords) |
 | `rename_source` | Rename a source |
+| `check_source_freshness` | Check if a source needs to be refreshed |
 | `refresh_source` | Re-fetch and re-index a URL-based source |
 | `delete_source` | Remove a source from a notebook |
 
@@ -79,7 +81,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 | `download_data_table` | Download generated data table |
 | `download_mind_map` | Download generated mind map |
 
-#### Artifacts -- Management (5)
+#### Artifacts -- Management (6)
 
 | Tool | Description |
 |------|-------------|
@@ -88,6 +90,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 | `delete_artifact` | Delete an artifact |
 | `rename_artifact` | Rename an artifact |
 | `export_artifact` | Export an artifact to a file in a given format |
+| `suggest_reports` | Get AI-suggested report formats for a notebook |
 
 #### Research (3)
 

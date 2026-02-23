@@ -14,6 +14,7 @@ from notebooklm_mcp_server import (
     add_source_youtube,
     # Chat
     ask_question,
+    check_source_freshness,
     configure_chat,
     create_note,
     create_notebook,
@@ -66,6 +67,7 @@ from notebooklm_mcp_server import (
     list_notebooks_tool,
     # Notes
     list_notes,
+    list_sources,
     poll_research,
     refresh_source,
     remove_notebook_from_recent,
@@ -79,6 +81,7 @@ from notebooklm_mcp_server import (
     share_notebook,
     # Research
     start_research,
+    suggest_reports,
     update_note,
     update_shared_user,
 )
@@ -247,6 +250,34 @@ class TestDeleteSource:
         assert result["success"] is True
         assert result["deleted_source_id"] == "src-1"
         mock_client.sources.delete.assert_awaited_once_with("nb-1", "src-1")
+
+
+class TestListSources:
+    async def test_returns_source_list(self, mock_ctx, mock_client):
+        result = await list_sources("nb-1", ctx=mock_ctx)
+        assert result["count"] == 2
+        assert result["sources"][0]["id"] == "src-1"
+        assert result["sources"][1]["title"] == "Research Paper"
+        mock_client.sources.list.assert_awaited_once_with("nb-1")
+
+    async def test_returns_error_on_auth_failure(self, mock_ctx, app_context):
+        app_context.client = None
+        result = await list_sources("nb-1", ctx=mock_ctx)
+        assert "error" in result
+
+
+class TestCheckSourceFreshness:
+    async def test_returns_fresh(self, mock_ctx, mock_client):
+        result = await check_source_freshness("nb-1", "src-1", ctx=mock_ctx)
+        assert result["is_fresh"] is True
+        assert result["needs_refresh"] is False
+        mock_client.sources.check_freshness.assert_awaited_once_with("nb-1", "src-1")
+
+    async def test_returns_stale(self, mock_ctx, mock_client):
+        mock_client.sources.check_freshness.return_value = False
+        result = await check_source_freshness("nb-1", "src-1", ctx=mock_ctx)
+        assert result["is_fresh"] is False
+        assert result["needs_refresh"] is True
 
 
 # ============================================================================
@@ -459,6 +490,20 @@ class TestExportArtifact:
         result = await export_artifact("nb-1", "art-1", out, "pdf", ctx=mock_ctx)
         assert result["success"] is True
         mock_client.artifacts.export.assert_awaited_once()
+
+
+class TestSuggestReports:
+    async def test_returns_suggestions(self, mock_ctx, mock_client):
+        result = await suggest_reports("nb-1", ctx=mock_ctx)
+        assert result["count"] == 2
+        assert result["suggestions"][0]["title"] == "Executive Summary"
+        assert result["suggestions"][1]["prompt"] == "Analyse in depth"
+        mock_client.artifacts.suggest_reports.assert_awaited_once_with("nb-1")
+
+    async def test_returns_error_on_auth_failure(self, mock_ctx, app_context):
+        app_context.client = None
+        result = await suggest_reports("nb-1", ctx=mock_ctx)
+        assert "error" in result
 
 
 # ============================================================================

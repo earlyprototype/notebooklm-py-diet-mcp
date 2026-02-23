@@ -634,6 +634,64 @@ async def delete_source(
 
 
 @mcp.tool()
+async def list_sources(
+    notebook_id: str,
+    ctx: Context[ServerSession, AppContext] = None,
+) -> dict:
+    """List all sources in a notebook.
+
+    Args:
+        notebook_id: ID of the notebook
+
+    Returns:
+        Dictionary with source count and source details
+    """
+    app = ctx.request_context.lifespan_context
+    if not await _ensure_authenticated(app, ctx):
+        return {"error": "Authentication failed. Please check the logs."}
+
+    sources = await app.client.sources.list(notebook_id)
+    return {
+        "count": len(sources),
+        "sources": [
+            {
+                "id": s.id,
+                "title": s.title,
+                "kind": getattr(s, "kind", None),
+                "status": getattr(s, "status", None),
+            }
+            for s in sources
+        ],
+    }
+
+
+@mcp.tool()
+async def check_source_freshness(
+    notebook_id: str,
+    source_id: str,
+    ctx: Context[ServerSession, AppContext] = None,
+) -> dict:
+    """Check if a source needs to be refreshed.
+
+    Useful for URL and Google Drive sources to determine whether content
+    has changed since it was last indexed.
+
+    Args:
+        notebook_id: ID of the notebook
+        source_id: ID of the source to check
+
+    Returns:
+        Dictionary indicating whether the source is fresh
+    """
+    app = ctx.request_context.lifespan_context
+    if not await _ensure_authenticated(app, ctx):
+        return {"error": "Authentication failed. Please check the logs."}
+
+    is_fresh = await app.client.sources.check_freshness(notebook_id, source_id)
+    return {"source_id": source_id, "is_fresh": is_fresh, "needs_refresh": not is_fresh}
+
+
+@mcp.tool()
 async def get_notebook(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext],
@@ -1504,6 +1562,42 @@ async def export_artifact(
     data = await app.client.artifacts.export(notebook_id, artifact_id, export_format or None)
     Path(output_path).write_bytes(data if isinstance(data, bytes) else str(data).encode("utf-8"))
     return {"output_path": output_path, "success": True}
+
+
+@mcp.tool()
+async def suggest_reports(
+    notebook_id: str,
+    ctx: Context[ServerSession, AppContext] = None,
+) -> dict:
+    """Get AI-suggested report formats for a notebook.
+
+    Returns tailored report suggestions based on the notebook's content,
+    each with a title, description, and prompt that can be passed to
+    generate_report.
+
+    Args:
+        notebook_id: ID of the notebook
+
+    Returns:
+        Dictionary with suggested report formats
+    """
+    app = ctx.request_context.lifespan_context
+    if not await _ensure_authenticated(app, ctx):
+        return {"error": "Authentication failed. Please check the logs."}
+
+    suggestions = await app.client.artifacts.suggest_reports(notebook_id)
+    return {
+        "count": len(suggestions),
+        "suggestions": [
+            {
+                "title": getattr(s, "title", ""),
+                "description": getattr(s, "description", ""),
+                "prompt": getattr(s, "prompt", ""),
+                "audience_level": getattr(s, "audience_level", None),
+            }
+            for s in suggestions
+        ],
+    }
 
 
 # ============================================================================
