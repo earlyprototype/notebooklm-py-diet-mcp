@@ -11,7 +11,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 
 ## Features
 
-### MCP Tools (67)
+### MCP Tools (69)
 
 #### Notebooks (9)
 
@@ -69,7 +69,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 
 | Tool | Description |
 |------|-------------|
-| `download_audio` | Download generated audio as MP3 |
+| `download_audio` | Download generated audio as WAV |
 | `download_video` | Download generated video |
 | `download_report` | Download generated report |
 | `download_quiz` | Download quiz as JSON, Markdown, or HTML |
@@ -134,6 +134,13 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 | `get_account_info` | Show the active account and available profiles |
 | `switch_account` | Switch to a different Google account profile at runtime |
 | `create_profile` | Create a new account profile and launch browser sign-in |
+
+#### Utilities (2)
+
+| Tool | Description |
+|------|-------------|
+| `pdf_to_png` | Convert a PDF to individual PNG images (one per page) |
+| `png_to_pdf` | Combine PNG images into a single PDF document |
 
 ### MCP Resources
 
@@ -325,7 +332,6 @@ notebooklm-py-mcp/
     test_lifespan.py           # Server startup scenario tests
   docs/
     setup.md                  # Detailed setup guide
-    assessment.md             # Technical assessment and architecture
 ```
 
 ## Development
