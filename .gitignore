@@ -43,3 +43,9 @@ browser_profile/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Internal tooling and research artefacts
+tools/
+
+# Internal assessment docs
+docs/assessment.md
