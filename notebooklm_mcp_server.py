@@ -547,10 +547,13 @@ async def generate_and_download(
 
         if artifact_type == "audio":
             gen_kwargs["audio_format"] = audio_format
-            gen_kwargs["length"] = audio_length
+            gen_kwargs["audio_length"] = audio_length
             status = await app.client.artifacts.generate_audio(notebook_id, **gen_kwargs)
         elif artifact_type == "report":
-            status = await app.client.artifacts.generate_report(notebook_id, **gen_kwargs)
+            report_kwargs: dict = {}
+            if instructions:
+                report_kwargs["custom_prompt"] = instructions
+            status = await app.client.artifacts.generate_report(notebook_id, **report_kwargs)
         elif artifact_type == "slide_deck":
             status = await app.client.artifacts.generate_slide_deck(notebook_id, **gen_kwargs)
         elif artifact_type == "quiz":
@@ -635,7 +638,10 @@ async def export_artifact(
         return {"error": "Authentication failed. Please check the logs."}
 
     await ctx.info(f"Exporting artifact to: {output_path}")
-    data = await app.client.artifacts.export(notebook_id, artifact_id, export_format or None)
+    export_kwargs: dict = {"artifact_id": artifact_id}
+    if export_format:
+        export_kwargs["export_type"] = export_format
+    data = await app.client.artifacts.export(notebook_id, **export_kwargs)
     Path(output_path).write_bytes(data if isinstance(data, bytes) else str(data).encode("utf-8"))
     return {"output_path": output_path, "success": True}
 
