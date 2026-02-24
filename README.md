@@ -190,6 +190,42 @@ Once configured, you can interact with NotebookLM directly from your AI agent:
 **Generate a styled slide deck:**
 > "Generate a slide deck for the Strategy notebook using the Corporate template"
 
+## Slide Template Demos
+
+The three bundled templates produce distinctly different output from the same workflow. Each example below was generated from a subsection of an innovation literacy training programme.
+
+### Corporate
+
+Strategy consulting style -- serif headings, blue accent, data-dense layouts with charts, tables, and evidence callouts.
+
+<p>
+<img src="docs/demos/selected/corporate_1.png" width="32%" alt="Corporate slide: historical analogy mapping" />
+<img src="docs/demos/selected/corporate_2.png" width="32%" alt="Corporate slide: diagnostic table" />
+<img src="docs/demos/selected/corporate_3.png" width="32%" alt="Corporate slide: recommendation table" />
+</p>
+
+### Educational
+
+Workshop and training style -- warm cream background, teal/amber accents, illustrated concepts, generous whitespace.
+
+<p>
+<img src="docs/demos/selected/educational_1.png" width="32%" alt="Educational slide: operational vs design thinking comparison" />
+<img src="docs/demos/selected/educational_2.png" width="32%" alt="Educational slide: four-point capture cycle" />
+<img src="docs/demos/selected/educational_3.png" width="32%" alt="Educational slide: disproven hypothesis principle" />
+</p>
+
+### Creative
+
+Pitch deck style -- dark backgrounds, lime accent, bold typography, minimal text, visually striking layouts.
+
+<p>
+<img src="docs/demos/selected/creative_1.png" width="32%" alt="Creative slide: hero statement on dark background" />
+<img src="docs/demos/selected/creative_2.png" width="32%" alt="Creative slide: facilitation gap with split contrast" />
+<img src="docs/demos/selected/creative_3.png" width="32%" alt="Creative slide: 2x2 grid with icons" />
+</p>
+
+See `templates/slide_styles.md` for the full template definitions or create your own following the same structure.
+
 ## Project Structure
 
 ```
@@ -209,6 +245,7 @@ notebooklm-py-diet-mcp/
     slide_styles.md           # Bundled slide design templates
   docs/
     setup.md                  # Detailed setup guide
+    demos/selected/           # Slide template demo images
 ```
 
 ## Development

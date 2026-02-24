@@ -49,3 +49,9 @@ tools/
 
 # Internal assessment docs
 docs/assessment.md
+
+# Demo build artefacts (keep only docs/demos/selected/)
+docs/demos/*.pdf
+docs/demos/corporate_pages/
+docs/demos/educational_pages/
+docs/demos/creative_pages/
