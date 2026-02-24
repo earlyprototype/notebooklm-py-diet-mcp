@@ -409,7 +409,7 @@ async def add_sources(
                 added = await app.client.sources.add_url(notebook_id, value, wait=wait)
             elif src_type == "text":
                 title = src.get("title", f"Text source {i + 1}")
-                added = await app.client.sources.add_text(notebook_id, value, title=title)
+                added = await app.client.sources.add_text(notebook_id, title, value)
             elif src_type == "file":
                 added = await app.client.sources.add_file(notebook_id, value, wait=wait)
             else:
