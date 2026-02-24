@@ -366,7 +366,7 @@ async def list_sources(
 @mcp.tool()
 async def add_sources(
     notebook_id: str,
-    sources: list[dict],
+    sources: str,
     wait: bool = True,
     ctx: Context[ServerSession, AppContext] = None,
 ) -> dict:
@@ -378,7 +378,7 @@ async def add_sources(
 
     Args:
         notebook_id: ID of the notebook
-        sources: List of sources, e.g.
+        sources: JSON array of sources, e.g.
             [{"type": "url", "value": "https://example.com"},
              {"type": "text", "value": "Content here", "title": "My Notes"},
              {"type": "file", "value": "/path/to/document.pdf"}]
@@ -391,11 +391,19 @@ async def add_sources(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
 
+    try:
+        parsed = json.loads(sources) if isinstance(sources, str) else sources
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON in sources parameter: {e}"}
+
+    if not isinstance(parsed, list):
+        return {"error": "sources must be a JSON array"}
+
     results = []
-    for i, src in enumerate(sources):
+    for i, src in enumerate(parsed):
         src_type = src.get("type", "").lower()
         value = src.get("value", "")
-        await ctx.info(f"Adding source {i + 1}/{len(sources)}: {src_type}")
+        await ctx.info(f"Adding source {i + 1}/{len(parsed)}: {src_type}")
         try:
             if src_type == "url":
                 added = await app.client.sources.add_url(notebook_id, value, wait=wait)
@@ -412,7 +420,7 @@ async def add_sources(
             results.append({"index": i, "error": str(e)})
 
     succeeded = sum(1 for r in results if r.get("success"))
-    return {"total": len(sources), "succeeded": succeeded, "results": results}
+    return {"total": len(parsed), "succeeded": succeeded, "results": results}
 
 
 # ============================================================================
@@ -424,8 +432,8 @@ async def add_sources(
 async def ask_question(
     notebook_id: str,
     question: str,
-    source_ids: list[str] | None = None,
-    conversation_id: str | None = None,
+    source_ids: str = "",
+    conversation_id: str = "",
     persona: str = "",
     response_length: str = "",
     ctx: Context[ServerSession, AppContext] = None,
@@ -435,7 +443,7 @@ async def ask_question(
     Args:
         notebook_id: ID of the notebook to query
         question: The question to ask
-        source_ids: Restrict the query to specific source IDs (optional)
+        source_ids: Comma-separated source IDs to restrict the query (optional)
         conversation_id: Continue an existing conversation thread (optional)
         persona: Set chat persona before asking (optional). Use a descriptive
             role like "tutor", "analyst", "concise summariser". Cleared if empty.
@@ -448,6 +456,8 @@ async def ask_question(
     app = ctx.request_context.lifespan_context
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
+
+    parsed_source_ids = [s.strip() for s in source_ids.split(",") if s.strip()] if source_ids else None
 
     if persona or response_length:
         configure_kwargs: dict = {}
@@ -463,8 +473,8 @@ async def ask_question(
     await ctx.report_progress(0.5, 1.0, "Generating answer...")
 
     kwargs = {}
-    if source_ids:
-        kwargs["source_ids"] = source_ids
+    if parsed_source_ids:
+        kwargs["source_ids"] = parsed_source_ids
     if conversation_id:
         kwargs["conversation_id"] = conversation_id
 
@@ -899,7 +909,7 @@ async def pdf_to_png(
 
 @mcp.tool()
 async def png_to_pdf(
-    image_paths: list[str] | None = None,
+    image_paths: str = "",
     image_directory: str = "",
     output_path: str = "",
 ) -> dict:
@@ -911,7 +921,7 @@ async def png_to_pdf(
     preserves correct order automatically).
 
     Args:
-        image_paths: Explicit ordered list of image file paths
+        image_paths: Comma-separated image file paths, or a JSON array of paths
         image_directory: Directory of PNG files to combine (alternative to image_paths)
         output_path: Path for the output PDF. Defaults to <directory>/combined.pdf
 
@@ -920,8 +930,19 @@ async def png_to_pdf(
     """
     import fitz  # pymupdf
 
+    resolved_paths = None
     if image_paths:
-        files = [Path(p) for p in image_paths]
+        image_paths = image_paths.strip()
+        if image_paths.startswith("["):
+            try:
+                resolved_paths = json.loads(image_paths)
+            except json.JSONDecodeError as e:
+                return {"error": f"Invalid JSON in image_paths: {e}"}
+        else:
+            resolved_paths = [p.strip() for p in image_paths.split(",") if p.strip()]
+
+    if resolved_paths:
+        files = [Path(p) for p in resolved_paths]
     elif image_directory:
         src = Path(image_directory)
         if not src.is_dir():

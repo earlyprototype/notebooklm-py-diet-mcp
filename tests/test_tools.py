@@ -4,6 +4,8 @@ Each test verifies that the tool calls the correct SDK method with the
 expected arguments and returns a well-structured result dict.
 """
 
+import json
+
 from notebooklm_mcp_server import (
     add_sources,
     ask_question,
@@ -63,31 +65,43 @@ class TestListSources:
 
 class TestAddSources:
     async def test_adds_multiple_sources(self, mock_ctx, mock_client):
-        sources = [
-            {"type": "url", "value": "https://example.com"},
-            {"type": "text", "value": "Some text", "title": "My Notes"},
-        ]
-        result = await add_sources("nb-1", sources, ctx=mock_ctx)
+        sources_json = json.dumps(
+            [
+                {"type": "url", "value": "https://example.com"},
+                {"type": "text", "value": "Some text", "title": "My Notes"},
+            ]
+        )
+        result = await add_sources("nb-1", sources_json, ctx=mock_ctx)
         assert result["total"] == 2
         assert result["succeeded"] == 2
         mock_client.sources.add_url.assert_awaited_once()
         mock_client.sources.add_text.assert_awaited_once()
 
     async def test_adds_file_source(self, mock_ctx, mock_client):
-        sources = [{"type": "file", "value": "/tmp/doc.pdf"}]
-        result = await add_sources("nb-1", sources, ctx=mock_ctx)
+        sources_json = json.dumps([{"type": "file", "value": "/tmp/doc.pdf"}])
+        result = await add_sources("nb-1", sources_json, ctx=mock_ctx)
         assert result["succeeded"] == 1
         mock_client.sources.add_file.assert_awaited_once()
 
     async def test_handles_unknown_source_type(self, mock_ctx, mock_client):
-        sources = [{"type": "unknown", "value": "data"}]
-        result = await add_sources("nb-1", sources, ctx=mock_ctx)
+        sources_json = json.dumps([{"type": "unknown", "value": "data"}])
+        result = await add_sources("nb-1", sources_json, ctx=mock_ctx)
         assert result["succeeded"] == 0
         assert "error" in result["results"][0]
 
+    async def test_rejects_invalid_json(self, mock_ctx, mock_client):
+        result = await add_sources("nb-1", "not valid json", ctx=mock_ctx)
+        assert "error" in result
+        assert "Invalid JSON" in result["error"]
+
+    async def test_rejects_non_array_json(self, mock_ctx, mock_client):
+        result = await add_sources("nb-1", '{"type": "url"}', ctx=mock_ctx)
+        assert "error" in result
+        assert "JSON array" in result["error"]
+
     async def test_returns_error_on_auth_failure(self, mock_ctx, app_context):
         app_context.client = None
-        result = await add_sources("nb-1", [], ctx=mock_ctx)
+        result = await add_sources("nb-1", "[]", ctx=mock_ctx)
         assert "error" in result
 
 
@@ -104,7 +118,7 @@ class TestAskQuestion:
         mock_client.chat.ask.assert_awaited_once()
 
     async def test_with_source_ids(self, mock_ctx, mock_client):
-        result = await ask_question("nb-1", "Summarise", source_ids=["src-1"], ctx=mock_ctx)
+        result = await ask_question("nb-1", "Summarise", source_ids="src-1,src-2", ctx=mock_ctx)
         assert result["answer"] == "The key findings are..."
 
     async def test_configures_persona_before_asking(self, mock_ctx, mock_client):
@@ -218,3 +232,48 @@ class TestGetAccountInfo:
         result = await get_account_info(mock_ctx)
         assert result["current_account"] == "test"
         assert "available_profiles" in result
+
+
+# ============================================================================
+# SCHEMA VALIDATION -- prevents regression of complex-type parameters
+# ============================================================================
+
+SCALAR_TYPES = {"string", "integer", "number", "boolean"}
+SAFE_COMPOUND = {"string", "integer", "number", "boolean", "null"}
+
+
+class TestToolSchemas:
+    """Verify that every registered tool uses only MCP-client-safe types.
+
+    FastMCP converts Python type annotations to JSON Schema. Complex
+    types such as list[dict] produce schemas that Cursor and other MCP
+    clients cannot reliably invoke. All tool parameters should resolve
+    to scalar JSON Schema types (string, integer, number, boolean) or
+    simple unions thereof (e.g. string | null via anyOf).
+    """
+
+    def test_all_tool_parameters_are_scalar(self):
+        from notebooklm_mcp_server import mcp as server
+
+        violations = []
+        for tool in server._tool_manager._tools.values():
+            schema = tool.parameters
+            props = schema.get("properties", {})
+            for param_name, param_schema in props.items():
+                if param_name == "ctx":
+                    continue
+                if not _is_safe_schema(param_schema):
+                    violations.append(f"{tool.name}.{param_name}: {json.dumps(param_schema)}")
+
+        assert not violations, "Tool parameters with complex types that will break MCP clients:\n" + "\n".join(
+            violations
+        )
+
+
+def _is_safe_schema(schema: dict) -> bool:
+    """Return True if a parameter schema uses only client-safe types."""
+    if schema.get("type") in SCALAR_TYPES:
+        return True
+    if "anyOf" in schema:
+        return all(opt.get("type") in SAFE_COMPOUND for opt in schema["anyOf"])
+    return schema.get("type") == "null"
