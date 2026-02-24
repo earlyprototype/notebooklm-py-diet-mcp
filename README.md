@@ -13,6 +13,14 @@ Built on [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) by [Teng
 
 Need granular control over every SDK method? See the full-fat [notebooklm-py-MCP](https://github.com/earlyprototype/notebooklm-py-MCP) (72 individual tools exposed - designed primarily for testing).
 
+## Beyond the SDK
+
+This server is not just a thin wrapper. It adds capabilities that the underlying API does not provide:
+
+- **Templated slide generation** -- Three bundled design templates (Corporate, Educational, Creative) in `templates/slide_styles.md`. Pass any template as the `instructions` parameter to `generate_and_download` and NotebookLM will follow the specified tone, colour palette, typography, and layout rules. Create your own templates using the same structure.
+- **PDF / PNG round-trip editing** -- `pdf_to_png` splits a downloaded slide deck (or any PDF) into individual page images that an LLM can review, critique, or annotate. `png_to_pdf` reassembles edited pages back into a single document. This enables a generate-review-refine loop that is not possible through the NotebookLM interface alone.
+- **Inline persona control** -- `ask_question` accepts optional `persona` and `response_length` parameters, configuring the chat persona in the same call rather than requiring a separate configuration step.
+
 ## AI Workflow Tools (14)
 
 | Tool | Description |
@@ -45,10 +53,7 @@ Need granular control over every SDK method? See the full-fat [notebooklm-py-MCP
 |--------|-------------|
 | `analyze_notebook_sources` | Template for analysing notebook sources by theme |
 | `research_topic_workflow` | Guided research workflow using NotebookLM tools |
-
-### Bundled Templates
-
-The `templates/slide_styles.md` file contains three ready-to-use slide design templates (Corporate, Educational, Creative). Pass any template's contents as the `instructions` parameter to `generate_and_download` when creating slide decks.
+| `generate_styled_slides` | Generate a slide deck using a bundled design template (corporate, educational, creative) |
 
 ## Prerequisites
 

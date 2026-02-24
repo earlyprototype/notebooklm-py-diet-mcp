@@ -1015,6 +1015,76 @@ Steps:
 Use the NotebookLM MCP tools to execute this workflow."""
 
 
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_STYLE_SECTIONS = {"corporate": "## Corporate", "educational": "## Educational", "creative": "## Creative"}
+
+
+def _load_slide_template(style: str) -> str:
+    """Extract a single template section from slide_styles.md."""
+    styles_file = _TEMPLATE_DIR / "slide_styles.md"
+    if not styles_file.is_file():
+        return f"Template file not found at {styles_file}"
+
+    content = styles_file.read_text(encoding="utf-8")
+    header = _STYLE_SECTIONS.get(style.lower())
+    if not header:
+        return f"Unknown style '{style}'. Available: {', '.join(_STYLE_SECTIONS)}"
+
+    start = content.find(header)
+    if start == -1:
+        return f"Style '{style}' not found in template file"
+
+    after_header = content[start + len(header) :]
+    for other in _STYLE_SECTIONS.values():
+        if other != header:
+            end = after_header.find(other)
+            if end != -1:
+                after_header = after_header[:end]
+                break
+
+    return (header + after_header).rstrip("-\n ").strip()
+
+
+@mcp.prompt()
+def generate_styled_slides(
+    notebook_id: str,
+    style: str = "corporate",
+    output_path: str = "slides.pdf",
+) -> str:
+    """Generate a slide deck using a bundled design template.
+
+    Reads the selected template from templates/slide_styles.md and
+    provides complete instructions for generating and downloading
+    a styled slide deck.
+
+    Args:
+        notebook_id: ID of the notebook to generate slides from
+        style: Design template to use: corporate, educational, or creative
+        output_path: Where to save the downloaded PDF
+
+    Returns:
+        Formatted prompt with the template and tool call instructions
+    """
+    template = _load_slide_template(style)
+
+    return f"""Generate a styled slide deck from notebook {notebook_id}.
+
+Style: {style}
+
+Call the generate_and_download tool with these parameters:
+  notebook_id: {notebook_id}
+  artifact_type: slide_deck
+  output_path: {output_path}
+  instructions: (paste the design template below)
+
+--- DESIGN TEMPLATE ---
+{template}
+--- END TEMPLATE ---
+
+After downloading, consider using pdf_to_png to split the PDF into
+individual page images for review."""
+
+
 # ============================================================================
 # SERVER EXECUTION
 # ============================================================================
