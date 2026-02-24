@@ -1,19 +1,17 @@
 # notebooklm-py-diet-mcp
 
-A lightweight [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for [Google NotebookLM](https://notebooklm.google.com/) -- designed for practical use with AI agents in [Cursor](https://cursor.com/), [Claude Code](https://docs.claude.com/en/docs/claude-code), and other MCP-compatible clients.
+Connect your AI agent to [Google NotebookLM](https://notebooklm.google.com/). Query your notebooks, add sources, generate reports, podcasts, slide decks, and more -- directly from [Cursor](https://cursor.com/), [Claude Code](https://docs.claude.com/en/docs/claude-code), or any [MCP-compatible](https://modelcontextprotocol.io/) client.
 
-Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) by [Teng Lin](https://github.com/teng-lin) -- the unofficial Python API for Google NotebookLM.
+**14 tools. Full NotebookLM feature coverage.** Multi-step workflows (research, generate, download) are packaged as single tool calls so the agent gets more done with fewer round trips.
 
-> **Unofficial** -- This project uses undocumented Google APIs via notebooklm-py. It is not affiliated with Google. APIs may change without notice. Best suited for research, prototyping, and personal productivity workflows.
+Built on [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) by [Teng Lin](https://github.com/teng-lin).
+
+> **Unofficial** -- Uses undocumented Google APIs via notebooklm-py. Not affiliated with Google. APIs may change without notice.
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Licence: MIT](https://img.shields.io/badge/licence-MIT-green)
 
-## Why Diet?
-
-Standard MCP servers for NotebookLM expose 70+ individual tools. This creates token overhead, increases latency, and can overwhelm the model's tool selection. The diet server packages the same capabilities into **14 workflow-oriented tools** that cover the full feature set through composite operations.
-
-For full SDK parity (72 individual tools), see [notebooklm-py-MCP](https://github.com/earlyprototype/notebooklm-py-MCP).
+Need granular control over every SDK method? See [notebooklm-py-MCP](https://github.com/earlyprototype/notebooklm-py-MCP) (72 individual tools).
 
 ## Tools (14)
 
