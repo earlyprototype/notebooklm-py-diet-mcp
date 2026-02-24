@@ -44,6 +44,34 @@ Rules:
   - No illustrations, background images, gradients, drop shadows, or 3D effects
   - No large empty spaces -- information density is the point
 
+### Example Output -- Corporate
+
+Generated from Innovation Literacy source material on Cargo Culting.
+
+<p>
+<img src="../docs/demos/corporate/page_001.png" width="48%" />
+<img src="../docs/demos/corporate/page_002.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/corporate/page_003.png" width="48%" />
+<img src="../docs/demos/corporate/page_004.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/corporate/page_005.png" width="48%" />
+<img src="../docs/demos/corporate/page_006.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/corporate/page_007.png" width="48%" />
+<img src="../docs/demos/corporate/page_008.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/corporate/page_009.png" width="48%" />
+<img src="../docs/demos/corporate/page_010.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/corporate/page_011.png" width="48%" />
+</p>
+
 ---
 
 ## Educational
@@ -78,6 +106,42 @@ Rules:
   - No dense data tables or complex charts -- simplify into key numbers
   - No dark backgrounds -- keep it bright and inviting
 
+### Example Output -- Educational
+
+Generated from Innovation Literacy source material on Failure Is Data.
+
+<p>
+<img src="../docs/demos/educational/page_001.png" width="48%" />
+<img src="../docs/demos/educational/page_002.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_003.png" width="48%" />
+<img src="../docs/demos/educational/page_004.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_005.png" width="48%" />
+<img src="../docs/demos/educational/page_006.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_007.png" width="48%" />
+<img src="../docs/demos/educational/page_008.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_009.png" width="48%" />
+<img src="../docs/demos/educational/page_010.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_011.png" width="48%" />
+<img src="../docs/demos/educational/page_012.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_013.png" width="48%" />
+<img src="../docs/demos/educational/page_014.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/educational/page_015.png" width="48%" />
+</p>
+
 ---
 
 ## Creative
@@ -111,3 +175,36 @@ Rules:
   - Use high-quality imagery, no clip art or stock illustrations
   - No bullet point lists -- restructure as visual elements
   - Maintain consistent accent colour throughout, never mix accents
+
+### Example Output -- Creative
+
+Generated from Innovation Literacy source material on Facilitation.
+
+<p>
+<img src="../docs/demos/creative/page_001.png" width="48%" />
+<img src="../docs/demos/creative/page_002.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/creative/page_003.png" width="48%" />
+<img src="../docs/demos/creative/page_004.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/creative/page_005.png" width="48%" />
+<img src="../docs/demos/creative/page_006.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/creative/page_007.png" width="48%" />
+<img src="../docs/demos/creative/page_008.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/creative/page_009.png" width="48%" />
+<img src="../docs/demos/creative/page_010.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/creative/page_011.png" width="48%" />
+<img src="../docs/demos/creative/page_012.png" width="48%" />
+</p>
+<p>
+<img src="../docs/demos/creative/page_013.png" width="48%" />
+<img src="../docs/demos/creative/page_014.png" width="48%" />
+</p>

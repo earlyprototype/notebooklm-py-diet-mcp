@@ -50,7 +50,7 @@ tools/
 # Internal assessment docs
 docs/assessment.md
 
-# Demo build artefacts (keep only docs/demos/selected/)
+# Demo build artefacts (keep docs/demos/selected/ and full sets)
 docs/demos/*.pdf
 docs/demos/corporate_pages/
 docs/demos/educational_pages/

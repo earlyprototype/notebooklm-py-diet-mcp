@@ -245,7 +245,10 @@ notebooklm-py-diet-mcp/
     slide_styles.md           # Bundled slide design templates
   docs/
     setup.md                  # Detailed setup guide
-    demos/selected/           # Slide template demo images
+    demos/selected/           # Curated slide demo images (README gallery)
+      demos/corporate/          # Full corporate template example set
+      demos/educational/        # Full educational template example set
+      demos/creative/           # Full creative template example set
 ```
 
 ## Development
