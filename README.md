@@ -2,7 +2,7 @@
 
 Connect your AI agent to [Google NotebookLM](https://notebooklm.google.com/). Query your notebooks, add sources, generate reports, podcasts, slide decks, and more -- directly from [Cursor](https://cursor.com/), [Claude Code](https://docs.claude.com/en/docs/claude-code), or any [MCP-compatible](https://modelcontextprotocol.io/) client.
 
-**14 tools. Full NotebookLM feature coverage.** Multi-step workflows (research, generate, download) are packaged as single tool calls so the agent gets more done with fewer round trips.
+**Workflow-orientated MCP toolset for IDE level interaction with NotebookLM.** Designed as a smart and lightweight MCP server to enable AI code assist-native multi-step workflows (research, generate artifacts, download and convert).  Packaged as single tool calls so the agent gets more done with less messing aroung and without losing capability.
 
 Built on [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) by [Teng Lin](https://github.com/teng-lin).
 
@@ -11,9 +11,9 @@ Built on [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) by [Teng
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Licence: MIT](https://img.shields.io/badge/licence-MIT-green)
 
-Need granular control over every SDK method? See [notebooklm-py-MCP](https://github.com/earlyprototype/notebooklm-py-MCP) (72 individual tools).
+Need granular control over every SDK method? See the full-fat [notebooklm-py-MCP](https://github.com/earlyprototype/notebooklm-py-MCP) (72 individual tools exposed - designed primarily for testing).
 
-## Tools (14)
+## AI Workflow Tools (14)
 
 | Tool | Description |
 |------|-------------|
