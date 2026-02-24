@@ -249,6 +249,47 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 # Initialise FastMCP server with lifespan
 mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
 
+# ---------------------------------------------------------------------------
+# Profile-based tool registration
+# ---------------------------------------------------------------------------
+# NOTEBOOKLM_PROFILE controls which tools are registered:
+#   "full"  (default) -- all 72+ tools for granular control
+#   "lite"  -- ~14 composite workflow tools for a streamlined experience
+#
+# Usage:  NOTEBOOKLM_PROFILE=lite  or  --lite CLI flag
+
+_PROFILE = os.environ.get("NOTEBOOKLM_PROFILE", "full").lower()
+if "--lite" in sys.argv:
+    _PROFILE = "lite"
+
+_LITE_TOOLS = {
+    "list_notebooks_tool",
+    "create_notebook",
+    "list_sources",
+    "add_sources",
+    "ask_question",
+    "generate_and_download",
+    "list_artifacts",
+    "export_artifact",
+    "research_and_import",
+    "get_account_info",
+    "switch_account",
+    "create_profile",
+    "pdf_to_png",
+    "png_to_pdf",
+}
+
+
+def register_tool():
+    """Conditionally register a tool based on the active profile."""
+
+    def decorator(fn):
+        if _PROFILE == "full" or fn.__name__ in _LITE_TOOLS:
+            return mcp.tool()(fn)
+        return fn
+
+    return decorator
+
 
 # ============================================================================
 # RESOURCES - Read-only data access
@@ -323,7 +364,7 @@ async def get_notebook_info(notebook_id: str, ctx: Context[ServerSession, AppCon
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def list_notebooks_tool(ctx: Context[ServerSession, AppContext]) -> dict:
     """List all NotebookLM notebooks.
 
@@ -340,7 +381,7 @@ async def list_notebooks_tool(ctx: Context[ServerSession, AppContext]) -> dict:
     return {"count": len(notebooks), "notebooks": [{"id": nb.id, "title": nb.title} for nb in notebooks]}
 
 
-@mcp.tool()
+@register_tool()
 async def create_notebook(title: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Create a new NotebookLM notebook.
 
@@ -361,7 +402,7 @@ async def create_notebook(title: str, ctx: Context[ServerSession, AppContext]) -
     return {"id": notebook.id, "title": notebook.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def add_source_url(
     notebook_id: str, url: str, wait: bool = True, ctx: Context[ServerSession, AppContext] = None
 ) -> dict:
@@ -390,7 +431,7 @@ async def add_source_url(
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def add_source_text(notebook_id: str, text: str, title: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Add text content as a source to a notebook.
 
@@ -413,7 +454,7 @@ async def add_source_text(notebook_id: str, text: str, title: str, ctx: Context[
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def get_source(
     notebook_id: str,
     source_id: str,
@@ -436,7 +477,7 @@ async def get_source(
     return {"id": source.id, "title": source.title}
 
 
-@mcp.tool()
+@register_tool()
 async def get_source_fulltext(
     notebook_id: str,
     source_id: str,
@@ -459,7 +500,7 @@ async def get_source_fulltext(
     return {"content": getattr(result, "content", str(result))}
 
 
-@mcp.tool()
+@register_tool()
 async def get_source_guide(
     notebook_id: str,
     source_id: str,
@@ -485,7 +526,7 @@ async def get_source_guide(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def add_source_youtube(
     notebook_id: str,
     url: str,
@@ -509,7 +550,7 @@ async def add_source_youtube(
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def add_source_file(
     notebook_id: str,
     file_path: str,
@@ -533,7 +574,7 @@ async def add_source_file(
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def add_source_drive(
     notebook_id: str,
     file_id: str,
@@ -561,7 +602,7 @@ async def add_source_drive(
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def rename_source(
     notebook_id: str,
     source_id: str,
@@ -586,7 +627,7 @@ async def rename_source(
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def refresh_source(
     notebook_id: str,
     source_id: str,
@@ -610,7 +651,7 @@ async def refresh_source(
     return {"id": source.id, "title": source.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def delete_source(
     notebook_id: str,
     source_id: str,
@@ -633,7 +674,7 @@ async def delete_source(
     return {"success": True, "deleted_source_id": source_id}
 
 
-@mcp.tool()
+@register_tool()
 async def list_sources(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -665,7 +706,7 @@ async def list_sources(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def check_source_freshness(
     notebook_id: str,
     source_id: str,
@@ -691,7 +732,7 @@ async def check_source_freshness(
     return {"source_id": source_id, "is_fresh": is_fresh, "needs_refresh": not is_fresh}
 
 
-@mcp.tool()
+@register_tool()
 async def get_notebook(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext],
@@ -712,7 +753,7 @@ async def get_notebook(
     return {"id": notebook.id, "title": notebook.title}
 
 
-@mcp.tool()
+@register_tool()
 async def delete_notebook(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext],
@@ -733,7 +774,7 @@ async def delete_notebook(
     return {"success": True, "deleted_id": notebook_id}
 
 
-@mcp.tool()
+@register_tool()
 async def rename_notebook(
     notebook_id: str,
     title: str,
@@ -756,7 +797,7 @@ async def rename_notebook(
     return {"id": notebook.id, "title": notebook.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def get_notebook_description(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext],
@@ -780,7 +821,7 @@ async def get_notebook_description(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def get_notebook_summary(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext],
@@ -801,7 +842,7 @@ async def get_notebook_summary(
     return {"summary": str(summary)}
 
 
-@mcp.tool()
+@register_tool()
 async def share_notebook(
     notebook_id: str,
     public: bool = False,
@@ -824,7 +865,7 @@ async def share_notebook(
     return {"success": True, "result": result}
 
 
-@mcp.tool()
+@register_tool()
 async def remove_notebook_from_recent(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext],
@@ -845,12 +886,14 @@ async def remove_notebook_from_recent(
     return {"success": True, "notebook_id": notebook_id}
 
 
-@mcp.tool()
+@register_tool()
 async def ask_question(
     notebook_id: str,
     question: str,
     source_ids: list[str] | None = None,
     conversation_id: str | None = None,
+    persona: str = "",
+    response_length: str = "",
     ctx: Context[ServerSession, AppContext] = None,
 ) -> dict:
     """Ask a question to a NotebookLM notebook and get an AI-generated answer.
@@ -860,6 +903,10 @@ async def ask_question(
         question: The question to ask
         source_ids: Restrict the query to specific source IDs (optional)
         conversation_id: Continue an existing conversation thread (optional)
+        persona: Set chat persona before asking (optional). Use a descriptive
+            role like "tutor", "analyst", "concise summariser". Cleared if empty.
+        response_length: Set response length before asking (optional).
+            One of: short, medium, long. Cleared if empty.
 
     Returns:
         Dictionary with the answer and citation information
@@ -867,6 +914,16 @@ async def ask_question(
     app = ctx.request_context.lifespan_context
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
+
+    if persona or response_length:
+        configure_kwargs: dict = {}
+        if persona:
+            configure_kwargs["goal"] = "custom"
+            configure_kwargs["custom_prompt"] = persona
+        if response_length:
+            configure_kwargs["response_length"] = response_length
+        with suppress(Exception):
+            await app.client.chat.configure(notebook_id, **configure_kwargs)
 
     await ctx.info(f"Querying notebook: {notebook_id}")
     await ctx.report_progress(0.5, 1.0, "Generating answer...")
@@ -889,7 +946,7 @@ async def ask_question(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def configure_chat(
     notebook_id: str,
     goal: str = "",
@@ -924,7 +981,7 @@ async def configure_chat(
     return {"success": True, "notebook_id": notebook_id, "config": kwargs}
 
 
-@mcp.tool()
+@register_tool()
 async def get_chat_history(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -950,7 +1007,7 @@ async def get_chat_history(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def generate_audio_overview(
     notebook_id: str,
     instructions: str = "",
@@ -989,7 +1046,7 @@ async def generate_audio_overview(
     return {"task_id": status.task_id, "status": "completed", "format": audio_format, "length": length}
 
 
-@mcp.tool()
+@register_tool()
 async def download_audio(notebook_id: str, output_path: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Download the generated audio overview to a file.
 
@@ -1015,7 +1072,7 @@ async def download_audio(notebook_id: str, output_path: str, ctx: Context[Server
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_quiz(
     notebook_id: str,
     quantity: str = "standard",
@@ -1050,7 +1107,7 @@ async def generate_quiz(
     return {"task_id": status.task_id, "status": "completed", "quantity": quantity, "difficulty": difficulty}
 
 
-@mcp.tool()
+@register_tool()
 async def download_quiz(
     notebook_id: str, output_path: str, output_format: str = "json", ctx: Context[ServerSession, AppContext] = None
 ) -> dict:
@@ -1084,7 +1141,7 @@ async def download_quiz(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def generate_video(
     notebook_id: str,
     instructions: str = "",
@@ -1109,7 +1166,7 @@ async def generate_video(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_video(
     notebook_id: str,
     output_path: str,
@@ -1132,7 +1189,7 @@ async def download_video(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_report(
     notebook_id: str,
     instructions: str = "",
@@ -1157,7 +1214,7 @@ async def generate_report(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_report(
     notebook_id: str,
     output_path: str,
@@ -1180,7 +1237,7 @@ async def download_report(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_flashcards(
     notebook_id: str,
     instructions: str = "",
@@ -1205,7 +1262,7 @@ async def generate_flashcards(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_flashcards(
     notebook_id: str,
     output_path: str,
@@ -1228,7 +1285,7 @@ async def download_flashcards(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_slide_deck(
     notebook_id: str,
     instructions: str = "",
@@ -1253,7 +1310,7 @@ async def generate_slide_deck(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_slide_deck(
     notebook_id: str,
     output_path: str,
@@ -1276,7 +1333,7 @@ async def download_slide_deck(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_infographic(
     notebook_id: str,
     instructions: str = "",
@@ -1301,7 +1358,7 @@ async def generate_infographic(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_infographic(
     notebook_id: str,
     output_path: str,
@@ -1324,7 +1381,7 @@ async def download_infographic(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_data_table(
     notebook_id: str,
     instructions: str = "",
@@ -1349,7 +1406,7 @@ async def generate_data_table(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_data_table(
     notebook_id: str,
     output_path: str,
@@ -1372,7 +1429,7 @@ async def download_data_table(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def generate_mind_map(
     notebook_id: str,
     instructions: str = "",
@@ -1397,7 +1454,7 @@ async def generate_mind_map(
     return {"task_id": status.task_id, "status": "completed"}
 
 
-@mcp.tool()
+@register_tool()
 async def download_mind_map(
     notebook_id: str,
     output_path: str,
@@ -1425,7 +1482,7 @@ async def download_mind_map(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def list_artifacts(
     notebook_id: str,
     artifact_type: str = "",
@@ -1453,7 +1510,7 @@ async def list_artifacts(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def get_artifact(
     notebook_id: str,
     artifact_id: str,
@@ -1479,7 +1536,7 @@ async def get_artifact(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def delete_artifact(
     notebook_id: str,
     artifact_id: str,
@@ -1502,7 +1559,7 @@ async def delete_artifact(
     return {"success": True, "deleted_artifact_id": artifact_id}
 
 
-@mcp.tool()
+@register_tool()
 async def rename_artifact(
     notebook_id: str,
     artifact_id: str,
@@ -1531,7 +1588,7 @@ async def rename_artifact(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def export_artifact(
     notebook_id: str,
     artifact_id: str,
@@ -1564,7 +1621,7 @@ async def export_artifact(
     return {"output_path": output_path, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def suggest_reports(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -1605,7 +1662,7 @@ async def suggest_reports(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def start_research(
     notebook_id: str,
     query: str,
@@ -1636,7 +1693,7 @@ async def start_research(
     return {"task_id": result.task_id, "status": "started"}
 
 
-@mcp.tool()
+@register_tool()
 async def poll_research(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -1660,7 +1717,7 @@ async def poll_research(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def import_research_sources(
     notebook_id: str,
     task_id: str,
@@ -1691,7 +1748,7 @@ async def import_research_sources(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def list_notes(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -1715,7 +1772,7 @@ async def list_notes(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def create_note(
     notebook_id: str,
     title: str,
@@ -1740,7 +1797,7 @@ async def create_note(
     return {"id": note.id, "title": note.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def get_note(
     notebook_id: str,
     note_id: str,
@@ -1763,7 +1820,7 @@ async def get_note(
     return {"id": note.id, "title": note.title, "content": note.content}
 
 
-@mcp.tool()
+@register_tool()
 async def update_note(
     notebook_id: str,
     note_id: str,
@@ -1796,7 +1853,7 @@ async def update_note(
     return {"id": note.id, "title": note.title, "success": True}
 
 
-@mcp.tool()
+@register_tool()
 async def delete_note(
     notebook_id: str,
     note_id: str,
@@ -1819,7 +1876,7 @@ async def delete_note(
     return {"success": True, "deleted_note_id": note_id}
 
 
-@mcp.tool()
+@register_tool()
 async def list_mind_maps(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -1843,7 +1900,7 @@ async def list_mind_maps(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def delete_mind_map(
     notebook_id: str,
     mind_map_id: str,
@@ -1871,7 +1928,7 @@ async def delete_mind_map(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def get_sharing_status(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -1896,7 +1953,7 @@ async def get_sharing_status(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def set_notebook_public(
     notebook_id: str,
     public: bool,
@@ -1919,7 +1976,7 @@ async def set_notebook_public(
     return {"success": True, "notebook_id": notebook_id, "public": public}
 
 
-@mcp.tool()
+@register_tool()
 async def set_notebook_view_level(
     notebook_id: str,
     level: str,
@@ -1942,7 +1999,7 @@ async def set_notebook_view_level(
     return {"success": True, "notebook_id": notebook_id, "view_level": level}
 
 
-@mcp.tool()
+@register_tool()
 async def add_shared_user(
     notebook_id: str,
     email: str,
@@ -1971,7 +2028,7 @@ async def add_shared_user(
     return {"success": True, "email": email, "permission": permission}
 
 
-@mcp.tool()
+@register_tool()
 async def update_shared_user(
     notebook_id: str,
     email: str,
@@ -1996,7 +2053,7 @@ async def update_shared_user(
     return {"success": True, "email": email, "permission": permission}
 
 
-@mcp.tool()
+@register_tool()
 async def remove_shared_user(
     notebook_id: str,
     email: str,
@@ -2024,7 +2081,7 @@ async def remove_shared_user(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def get_output_language(
     ctx: Context[ServerSession, AppContext] = None,
 ) -> dict:
@@ -2041,7 +2098,7 @@ async def get_output_language(
     return {"language": str(language)}
 
 
-@mcp.tool()
+@register_tool()
 async def set_output_language(
     language: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -2067,7 +2124,7 @@ async def set_output_language(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
     """Show the current NotebookLM account and available profiles.
 
@@ -2110,7 +2167,7 @@ async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
     }
 
 
-@mcp.tool()
+@register_tool()
 async def switch_account(
     profile: str,
     ctx: Context[ServerSession, AppContext],
@@ -2163,7 +2220,7 @@ async def switch_account(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def create_profile(
     profile: str,
     ctx: Context[ServerSession, AppContext],
@@ -2217,7 +2274,7 @@ async def create_profile(
 # ============================================================================
 
 
-@mcp.tool()
+@register_tool()
 async def pdf_to_png(
     pdf_path: str,
     output_directory: str = "",
@@ -2267,7 +2324,7 @@ async def pdf_to_png(
     }
 
 
-@mcp.tool()
+@register_tool()
 async def png_to_pdf(
     image_paths: list[str] | None = None,
     image_directory: str = "",
@@ -2386,12 +2443,217 @@ Use the NotebookLM MCP tools to execute this workflow."""
 
 
 # ============================================================================
+# COMPOSITE WORKFLOW TOOLS (registered in both lite and full profiles)
+# ============================================================================
+
+
+@register_tool()
+async def add_sources(
+    notebook_id: str,
+    sources: list[dict],
+    wait: bool = True,
+    ctx: Context[ServerSession, AppContext] = None,
+) -> dict:
+    """Add multiple sources to a notebook in a single call.
+
+    Each source is a dictionary with a "type" and "value" field.
+    Supported types: "url", "text", "file".
+    Text sources also require a "title" field.
+
+    Args:
+        notebook_id: ID of the notebook
+        sources: List of sources, e.g.
+            [{"type": "url", "value": "https://example.com"},
+             {"type": "text", "value": "Content here", "title": "My Notes"},
+             {"type": "file", "value": "/path/to/document.pdf"}]
+        wait: Whether to wait for processing to complete
+
+    Returns:
+        Dictionary with results for each source
+    """
+    app = ctx.request_context.lifespan_context
+    if not await _ensure_authenticated(app, ctx):
+        return {"error": "Authentication failed. Please check the logs."}
+
+    results = []
+    for i, src in enumerate(sources):
+        src_type = src.get("type", "").lower()
+        value = src.get("value", "")
+        await ctx.info(f"Adding source {i + 1}/{len(sources)}: {src_type}")
+        try:
+            if src_type == "url":
+                added = await app.client.sources.add_url(notebook_id, value, wait=wait)
+            elif src_type == "text":
+                title = src.get("title", f"Text source {i + 1}")
+                added = await app.client.sources.add_text(notebook_id, value, title=title)
+            elif src_type == "file":
+                added = await app.client.sources.add_file(notebook_id, value, wait=wait)
+            else:
+                results.append({"index": i, "error": f"Unknown source type: {src_type}"})
+                continue
+            results.append({"index": i, "id": added.id, "title": added.title, "success": True})
+        except Exception as e:
+            results.append({"index": i, "error": str(e)})
+
+    succeeded = sum(1 for r in results if r.get("success"))
+    return {"total": len(sources), "succeeded": succeeded, "results": results}
+
+
+@register_tool()
+async def generate_and_download(
+    notebook_id: str,
+    artifact_type: str,
+    output_path: str,
+    instructions: str = "",
+    audio_format: str = "deep-dive",
+    audio_length: str = "medium",
+    quiz_quantity: str = "standard",
+    quiz_difficulty: str = "medium",
+    quiz_output_format: str = "json",
+    ctx: Context[ServerSession, AppContext] = None,
+) -> dict:
+    """Generate an artifact and download it in a single call.
+
+    Supports: report, audio, slide_deck, quiz, infographic.
+
+    Args:
+        notebook_id: ID of the notebook
+        artifact_type: One of: report, audio, slide_deck, quiz, infographic
+        output_path: Path where to save the downloaded file. Use the correct
+            extension: .pdf (report, slide_deck, infographic), .wav (audio),
+            .json/.md/.html (quiz, based on quiz_output_format)
+        instructions: Custom instructions for generation (optional).
+            For slide decks, pass a design template here to control visual style.
+        audio_format: Audio format: deep-dive, brief, critique, debate
+        audio_length: Audio length: short, medium, long
+        quiz_quantity: Quiz quantity: few, standard, more
+        quiz_difficulty: Quiz difficulty: easy, medium, hard
+        quiz_output_format: Quiz download format: json, markdown, html
+
+    Returns:
+        Dictionary with generation and download status
+    """
+    app = ctx.request_context.lifespan_context
+    if not await _ensure_authenticated(app, ctx):
+        return {"error": "Authentication failed. Please check the logs."}
+
+    artifact_type = artifact_type.lower().replace(" ", "_")
+    valid_types = {"report", "audio", "slide_deck", "quiz", "infographic"}
+    if artifact_type not in valid_types:
+        return {"error": f"Unsupported artifact type: {artifact_type}. Use one of: {', '.join(sorted(valid_types))}"}
+
+    await ctx.info(f"Generating {artifact_type}...")
+
+    try:
+        gen_kwargs: dict = {}
+        if instructions:
+            gen_kwargs["instructions"] = instructions
+
+        if artifact_type == "audio":
+            gen_kwargs["audio_format"] = audio_format
+            gen_kwargs["length"] = audio_length
+            status = await app.client.artifacts.generate_audio(notebook_id, **gen_kwargs)
+        elif artifact_type == "report":
+            status = await app.client.artifacts.generate_report(notebook_id, **gen_kwargs)
+        elif artifact_type == "slide_deck":
+            status = await app.client.artifacts.generate_slide_deck(notebook_id, **gen_kwargs)
+        elif artifact_type == "quiz":
+            gen_kwargs["quantity"] = quiz_quantity
+            gen_kwargs["difficulty"] = quiz_difficulty
+            status = await app.client.artifacts.generate_quiz(notebook_id, **gen_kwargs)
+        elif artifact_type == "infographic":
+            status = await app.client.artifacts.generate_infographic(notebook_id, **gen_kwargs)
+
+        await ctx.info(f"Waiting for {artifact_type} generation to complete...")
+        await app.client.artifacts.wait_for_completion(notebook_id, status.task_id)
+
+        await ctx.info(f"Downloading {artifact_type} to {output_path}...")
+        if artifact_type == "audio":
+            await app.client.artifacts.download_audio(notebook_id, output_path)
+        elif artifact_type == "report":
+            await app.client.artifacts.download_report(notebook_id, output_path)
+        elif artifact_type == "slide_deck":
+            await app.client.artifacts.download_slide_deck(notebook_id, output_path)
+        elif artifact_type == "quiz":
+            await app.client.artifacts.download_quiz(notebook_id, output_path, output_format=quiz_output_format)
+        elif artifact_type == "infographic":
+            await app.client.artifacts.download_infographic(notebook_id, output_path)
+
+        return {"artifact_type": artifact_type, "output_path": output_path, "success": True}
+
+    except Exception as e:
+        return {"artifact_type": artifact_type, "error": str(e)}
+
+
+@register_tool()
+async def research_and_import(
+    notebook_id: str,
+    query: str,
+    source: str = "web",
+    max_results: int = 5,
+    ctx: Context[ServerSession, AppContext] = None,
+) -> dict:
+    """Research a topic and import the results as notebook sources in a single call.
+
+    Starts a research task, polls until completion, and automatically imports
+    the top results.
+
+    Args:
+        notebook_id: ID of the notebook
+        query: Research query
+        source: Where to search: "web" or "drive"
+        max_results: Maximum number of results to import
+
+    Returns:
+        Dictionary with research results and import status
+    """
+    app = ctx.request_context.lifespan_context
+    if not await _ensure_authenticated(app, ctx):
+        return {"error": "Authentication failed. Please check the logs."}
+
+    await ctx.info(f"Researching: {query}")
+    try:
+        task = await app.client.research.start(notebook_id, query, source=source)
+        task_id = task.task_id
+
+        poll_result = None
+        for _ in range(60):
+            await asyncio.sleep(2)
+            poll_result = await app.client.research.poll(notebook_id)
+            status = getattr(poll_result, "status", str(poll_result))
+            if status == "completed" or (isinstance(poll_result, dict) and poll_result.get("status") == "completed"):
+                break
+
+        results = getattr(poll_result, "results", [])
+        if isinstance(poll_result, dict):
+            results = poll_result.get("results", [])
+
+        to_import = results[:max_results] if results else []
+        if to_import:
+            await ctx.info(f"Importing {len(to_import)} sources...")
+            import_result = await app.client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
+        else:
+            import_result = {"imported": 0}
+
+        return {
+            "query": query,
+            "results_found": len(results),
+            "imported": len(to_import),
+            "import_details": import_result,
+            "success": True,
+        }
+
+    except Exception as e:
+        return {"query": query, "error": str(e)}
+
+
+# ============================================================================
 # SERVER EXECUTION
 # ============================================================================
 
 if __name__ == "__main__":
     transport = "stdio"
-    if len(sys.argv) > 1 and sys.argv[1] == "--http":
+    if "--http" in sys.argv:
         transport = "streamable-http"
 
     mcp.run(transport=transport)

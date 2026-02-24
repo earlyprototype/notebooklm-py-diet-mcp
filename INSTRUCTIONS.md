@@ -21,10 +21,13 @@ IMPORTANT - ask_question tool:
 - If the answer is insufficient, try rephrasing or breaking into smaller questions
 - Use source_ids to restrict the query to specific sources
 - Use conversation_id to continue an existing conversation thread
+- Optional persona parameter: sets a chat persona before asking (e.g. "strategy analyst", "tutor", "concise summariser"). This calls configure_chat automatically, removing the need for a separate call
+- Optional response_length parameter: controls response verbosity ("short", "medium", "long")
 
 IMPORTANT - Chat configuration:
 - Use configure_chat to set a persona (goal), response length, or custom prompt before asking questions
 - get_chat_history retrieves the full conversation log for a notebook
+- In the lite profile, ask_question's persona and response_length parameters replace the need for configure_chat
 
 IMPORTANT - Content generation:
 1. generate_audio_overview: Creates podcast-style audio. Formats: deep-dive, brief, critique, debate. Lengths: short, medium, long
@@ -100,6 +103,18 @@ ERROR HANDLING:
 - If notebooks return empty, confirm the correct account is active using get_account_info
 - Network timeouts on generation tools are normal for long content -- retry once before reporting failure
 - Destructive operations (delete_notebook, delete_source, delete_note, delete_artifact, delete_mind_map) cannot be undone -- always confirm with the user first
+
+IMPORTANT - Composite workflow tools (available in both full and lite profiles):
+- add_sources: Adds multiple sources in a single call. Each source is a dict with "type" (url, text, file) and "value". Text sources also require a "title". Returns a summary of successes and failures.
+  Example: add_sources("nb-1", [{"type": "url", "value": "https://example.com"}, {"type": "text", "value": "Content", "title": "Notes"}])
+- generate_and_download: Generates an artifact and downloads it in one step. Supported types: report, audio, slide_deck, quiz, infographic. Pass design instructions for slide_deck to control visual style. Correct file extensions: .pdf (report, slide_deck, infographic), .wav (audio), .json/.md/.html (quiz).
+- research_and_import: Starts a research task, polls until complete, and imports the top results. Params: query, source (web or drive), max_results. Replaces the manual start_research -> poll_research -> import_research_sources workflow.
+
+IMPORTANT - Slide design templates:
+- The templates/slide_styles.md file contains three ready-to-use design templates: Corporate, Educational, and Creative
+- Copy the contents of any template into the "instructions" parameter of generate_and_download or generate_slide_deck
+- Templates define tone, colour palette, typography, layout variations, and design rules
+- Custom templates can follow the same structure -- keep them to 40-80 lines for best results
 
 IMPORTANT - PDF / PNG conversion utilities:
 - pdf_to_png: Converts a PDF into individual PNG images (one per page). Use this to make slide deck pages visible to LLMs for visual review or editing. Default DPI of 200 balances quality and file size; increase for higher fidelity if needed. Output goes to a <filename>_pages/ folder beside the PDF by default.

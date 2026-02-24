@@ -11,7 +11,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 
 ## Features
 
-### MCP Tools (72)
+### MCP Tools (75)
 
 #### Notebooks (9)
 
@@ -49,7 +49,7 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 
 | Tool | Description |
 |------|-------------|
-| `ask_question` | Query a notebook with optional source filtering and conversation threading |
+| `ask_question` | Query a notebook with optional source filtering, conversation threading, persona, and response length |
 | `configure_chat` | Configure chat persona (goal, response length, custom prompt) |
 | `get_chat_history` | Retrieve conversation history |
 
@@ -138,6 +138,14 @@ Built on top of [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) b
 | `switch_account` | Switch to a different Google account profile at runtime |
 | `create_profile` | Create a new account profile and launch browser sign-in |
 
+#### Composite Workflow Tools (3)
+
+| Tool | Description |
+|------|-------------|
+| `add_sources` | Add multiple sources (URL, text, file) in a single call |
+| `generate_and_download` | Generate an artifact and download it in one step |
+| `research_and_import` | Research a topic and import results as sources automatically |
+
 #### Utilities (2)
 
 | Tool | Description |
@@ -217,9 +225,22 @@ notebooklm login
 notebooklm list
 ```
 
+## Profiles
+
+The server supports two tool profiles, controlled by the `NOTEBOOKLM_PROFILE` environment variable or the `--lite` CLI flag:
+
+| Profile | Tools | Use case |
+|---------|-------|----------|
+| `full` (default) | All 75 tools | Granular control, advanced workflows |
+| `lite` | 14 workflow-oriented tools | Reduced token overhead, streamlined agent experience |
+
+The **lite** profile exposes composite workflow tools that combine multiple SDK calls into single operations, plus essential management and utility tools:
+
+`list_notebooks_tool`, `create_notebook`, `list_sources`, `add_sources`, `ask_question`, `generate_and_download`, `list_artifacts`, `export_artifact`, `research_and_import`, `get_account_info`, `switch_account`, `create_profile`, `pdf_to_png`, `png_to_pdf`
+
 ## Configuration
 
-### Cursor
+### Cursor (full profile)
 
 Add the following to your `.cursor/mcp.json` file:
 
@@ -236,29 +257,52 @@ Add the following to your `.cursor/mcp.json` file:
 }
 ```
 
-Replace the placeholder paths with your actual paths. For example on Windows:
+### Cursor (lite profile)
 
 ```json
 {
   "mcpServers": {
     "notebooklm": {
-      "command": "C:\\Users\\You\\projects\\notebooklm-py-mcp\\venv\\Scripts\\python.exe",
+      "command": "<path-to-venv>/python",
       "args": [
-        "C:\\Users\\You\\projects\\notebooklm-py-mcp\\notebooklm_mcp_server.py"
+        "<path-to-repo>/notebooklm_mcp_server.py",
+        "--lite"
       ]
     }
   }
 }
 ```
 
-The server manages account profiles internally -- no `NOTEBOOKLM_HOME` environment variable is needed in the configuration. Use the `switch_account` and `get_account_info` tools to manage profiles at runtime.
+Alternatively, set the environment variable:
+
+```json
+{
+  "mcpServers": {
+    "notebooklm": {
+      "command": "<path-to-venv>/python",
+      "args": [
+        "<path-to-repo>/notebooklm_mcp_server.py"
+      ],
+      "env": {
+        "NOTEBOOKLM_PROFILE": "lite"
+      }
+    }
+  }
+}
+```
+
+Replace the placeholder paths with your actual paths. The server manages account profiles internally -- no `NOTEBOOKLM_HOME` environment variable is needed. Use `switch_account` and `get_account_info` to manage profiles at runtime.
 
 Restart Cursor after saving the configuration.
 
 ### Claude Code
 
 ```bash
+# Full profile
 claude mcp add notebooklm -- python /path/to/notebooklm_mcp_server.py
+
+# Lite profile
+claude mcp add notebooklm -- python /path/to/notebooklm_mcp_server.py --lite
 ```
 
 ### HTTP Transport (for MCP Inspector or remote access)
@@ -333,6 +377,8 @@ notebooklm-py-mcp/
     test_helpers.py            # Unit tests for helper functions
     test_tools.py              # Mock-based tool tests
     test_lifespan.py           # Server startup scenario tests
+  templates/
+    slide_styles.md           # Bundled slide design templates
   docs/
     setup.md                  # Detailed setup guide
 ```

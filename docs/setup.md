@@ -199,10 +199,28 @@ pip install -e ".[dev]"
 
 ## Development and Extension
 
+### Tool profiles
+
+The server supports `full` (default, all 75 tools) and `lite` (14 workflow-oriented tools) profiles.
+
+To run in lite mode:
+
+```bash
+# Via environment variable
+NOTEBOOKLM_PROFILE=lite python notebooklm_mcp_server.py
+
+# Via CLI flag
+python notebooklm_mcp_server.py --lite
+```
+
+For Cursor, add `--lite` to the `args` array or set `NOTEBOOKLM_PROFILE` in the `env` block of your `.cursor/mcp.json`. See the README for examples.
+
+To include a new tool in the lite profile, add its function name to the `_LITE_TOOLS` set in `notebooklm_mcp_server.py`.
+
 ### Adding a new tool
 
 ```python
-@mcp.tool()
+@register_tool()
 async def your_new_tool(
     param1: str,
     param2: int = 10,
