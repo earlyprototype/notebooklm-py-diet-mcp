@@ -1,6 +1,6 @@
 # Setup Guide
 
-Detailed instructions for installing, configuring, and testing the notebooklm-py-mcp server.
+Detailed instructions for installing, configuring, and testing the notebooklm-py-diet-mcp server.
 
 For a quick-start overview, see the [README](../README.md).
 
@@ -15,8 +15,8 @@ For a quick-start overview, see the [README](../README.md).
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/earlyprototype/notebooklm-py-MCP.git
-cd notebooklm-py-mcp
+git clone https://github.com/earlyprototype/notebooklm-py-diet-mcp.git
+cd notebooklm-py-diet-mcp
 ```
 
 ### 2. Create a virtual environment and install
@@ -88,9 +88,9 @@ Add the following to your `.cursor/mcp.json`:
 {
   "mcpServers": {
     "notebooklm": {
-      "command": "C:\\Users\\You\\projects\\notebooklm-py-mcp\\venv\\Scripts\\python.exe",
+      "command": "C:\\Users\\You\\projects\\notebooklm-py-diet-mcp\\venv\\Scripts\\python.exe",
       "args": [
-        "C:\\Users\\You\\projects\\notebooklm-py-mcp\\notebooklm_mcp_server.py"
+        "C:\\Users\\You\\projects\\notebooklm-py-diet-mcp\\notebooklm_mcp_server.py"
       ]
     }
   }
@@ -158,20 +158,14 @@ Once configured, try these prompts in Cursor:
 **Query a notebook:**
 > "Ask the Research notebook: what are the key findings?"
 
-**Add a source:**
-> "Add this URL to my Project notebook: https://en.wikipedia.org/wiki/Digital_fabrication"
+**Add sources:**
+> "Add these URLs to my Project notebook: https://en.wikipedia.org/wiki/Digital_fabrication, https://example.com/article"
 
 **Generate content:**
-> "Generate a podcast overview for the Strategy notebook"
+> "Generate a podcast overview for the Strategy notebook and download it"
 
 **Research:**
-> "Start a web research task on 'digital twins' in my Research notebook"
-
-**Notes:**
-> "Create a note in the Strategy notebook titled 'Action items'"
-
-**Sharing:**
-> "Share the Project notebook with colleague@example.com"
+> "Research 'digital twins' and import the results into my Research notebook"
 
 ## Troubleshooting
 
@@ -199,28 +193,10 @@ pip install -e ".[dev]"
 
 ## Development and Extension
 
-### Tool profiles
-
-The server supports `full` (default, all 75 tools) and `lite` (14 workflow-oriented tools) profiles.
-
-To run in lite mode:
-
-```bash
-# Via environment variable
-NOTEBOOKLM_PROFILE=lite python notebooklm_mcp_server.py
-
-# Via CLI flag
-python notebooklm_mcp_server.py --lite
-```
-
-For Cursor, add `--lite` to the `args` array or set `NOTEBOOKLM_PROFILE` in the `env` block of your `.cursor/mcp.json`. See the README for examples.
-
-To include a new tool in the lite profile, add its function name to the `_LITE_TOOLS` set in `notebooklm_mcp_server.py`.
-
 ### Adding a new tool
 
 ```python
-@register_tool()
+@mcp.tool()
 async def your_new_tool(
     param1: str,
     param2: int = 10,
@@ -265,15 +241,12 @@ MCP_DEBUG=1 python notebooklm_mcp_server.py
 |---|---|---|
 | List notebooks | < 1 second | Fast, suitable for frequent calls |
 | Create notebook | 1--2 seconds | Single network call |
-| Add URL source | 5--15 seconds | Depends on content size and processing |
-| Add file source | 5--20 seconds | Depends on file size |
+| Add sources (per source) | 5--15 seconds | Depends on content size and processing |
 | Ask question | 2--5 seconds | AI generation time |
-| Generate audio | 30--120 seconds | Long-running; progress is reported |
-| Generate video | 60--180 seconds | Long-running; progress is reported |
-| Generate report | 30--90 seconds | Moderate to long duration |
-| Generate quiz | 10--30 seconds | Moderate duration |
-| Start research | 10--60 seconds | Depends on query complexity and mode |
-| Download artifact | 2--10 seconds | Depends on file size |
+| Generate and download audio | 30--120 seconds | Long-running; progress is reported |
+| Generate and download report | 30--90 seconds | Moderate to long duration |
+| Generate and download slides | 30--90 seconds | Moderate to long duration |
+| Research and import | 10--60 seconds | Depends on query complexity |
 
 ## Security Considerations
 
