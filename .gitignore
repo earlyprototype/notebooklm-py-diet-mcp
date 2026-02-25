@@ -55,3 +55,6 @@ docs/demos/*.pdf
 docs/demos/corporate_pages/
 docs/demos/educational_pages/
 docs/demos/creative_pages/
+
+# Cover image working files (keep docs/cover.png)
+docs/cover-concepts/

@@ -1,5 +1,7 @@
 # notebooklm-py-diet-mcp
 
+![The Context Bridge -- Connecting AI coding agents to Google NotebookLM](docs/cover.png)
+
 Connect your AI agent to [Google NotebookLM](https://notebooklm.google.com/). Query your notebooks, add sources, generate reports, podcasts, slide decks, and more -- directly from [Cursor](https://cursor.com/), [Claude Code](https://docs.claude.com/en/docs/claude-code), or any [MCP-compatible](https://modelcontextprotocol.io/) client.
 
 **Workflow-orientated MCP toolset for IDE level interaction with NotebookLM.** Designed as a smart and lightweight MCP server to enable AI code assist-native multi-step workflows (research, generate artifacts, download and convert).  Packaged as single tool calls so the agent gets more done with less messing aroung and without losing capability.
