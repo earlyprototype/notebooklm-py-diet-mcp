@@ -202,7 +202,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     if storage_file.exists():
         try:
             client = await _create_client(profile)
-        except (ValueError, Exception):
+        except Exception:
             client = None
 
     ctx = AppContext(client=client, profile=profile)
