@@ -1,15 +1,15 @@
 [build-system]
 requires = ["hatchling"]
-build-backend = "hatchling.backends"
+build-backend = "hatchling.build"
 
 [project]
-name = "notebooklm-py-mcp"
+name = "notebooklm-py-diet-mcp"
 version = "1.0.0"
 description = "MCP server exposing Google NotebookLM as tools for AI agents"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-authors = []
+authors = [{ name = "Thom Conaty", email = "thomconatydesign@gmail.com" }]
 keywords = ["mcp", "notebooklm", "ai", "cursor", "claude"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -40,7 +40,12 @@ dev = [
 notebooklm-mcp = "notebooklm_mcp_server:mcp.run"
 
 [project.urls]
-Repository = "https://github.com/earlyprototype/notebooklm-py-MCP"
+Repository = "https://github.com/earlyprototype/notebooklm-py-diet-mcp"
+
+[tool.hatch.build.targets.wheel]
+# Single-module project: the module name doesn't match the project name,
+# so hatchling needs to be told explicitly what ships in the wheel.
+only-include = ["notebooklm_mcp_server.py"]
 
 [tool.ruff]
 target-version = "py310"
