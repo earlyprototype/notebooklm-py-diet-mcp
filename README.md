@@ -10,6 +10,7 @@ Built on [**notebooklm-py**](https://github.com/teng-lin/notebooklm-py) by [Teng
 
 > **Unofficial** -- Uses undocumented Google APIs via notebooklm-py. Not affiliated with Google. APIs may change without notice.
 
+![CI](https://github.com/earlyprototype/notebooklm-py-diet-mcp/actions/workflows/ci.yml/badge.svg)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Licence: MIT](https://img.shields.io/badge/licence-MIT-green)
 
