@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "notebooklm": {
+      "command": "${NOTEBOOKLM_MCP_PYTHON:-venv/bin/python}",
+      "args": ["notebooklm_mcp_server.py"]
+    }
+  }
+}

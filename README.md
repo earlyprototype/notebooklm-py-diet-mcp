@@ -141,9 +141,20 @@ Restart Cursor after saving the configuration.
 
 ### Claude Code
 
-```bash
-claude mcp add notebooklm -- python /path/to/notebooklm_mcp_server.py
+The repository ships a project-scoped `.mcp.json`, so opening this folder in Claude Code is enough -- it will prompt you to approve the `notebooklm` server on first launch. It defaults to the `venv/` created in step 2; on Windows, or if your interpreter lives elsewhere, point `NOTEBOOKLM_MCP_PYTHON` at it:
+
+```powershell
+# Windows (PowerShell)
+$env:NOTEBOOKLM_MCP_PYTHON = "venv\Scripts\python.exe"
 ```
+
+To register the server globally instead (available in every project), pass the absolute path to the virtual environment's interpreter -- not a bare `python`, which will not have the dependencies installed:
+
+```bash
+claude mcp add notebooklm -- /path/to/repo/venv/bin/python /path/to/repo/notebooklm_mcp_server.py
+```
+
+Verify with `claude mcp list`.
 
 ### HTTP Transport (for MCP Inspector or remote access)
 
@@ -234,6 +245,7 @@ See `templates/slide_styles.md` for the full template definitions or create your
 ```
 notebooklm-py-diet-mcp/
   notebooklm_mcp_server.py   # MCP server (14 tools, resources, prompts)
+  .mcp.json                   # Project-scoped MCP registration for Claude Code
   pyproject.toml              # Python packaging and tool configuration
   requirements.txt            # Convenience dependency file
   INSTRUCTIONS.md             # Context injected into the LLM when loaded
