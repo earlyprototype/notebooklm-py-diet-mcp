@@ -103,9 +103,28 @@ Restart Cursor after saving.
 
 ### Claude Code
 
-```bash
-claude mcp add notebooklm -- python /path/to/notebooklm_mcp_server.py
+The repository ships a project-scoped `.mcp.json`, so opening the repository folder in Claude Code is enough -- it prompts you to approve the `notebooklm` server on first launch. It resolves the interpreter as `venv/bin/python` relative to the repository root, matching the virtual environment created in step 2.
+
+Override that path with the `NOTEBOOKLM_MCP_PYTHON` environment variable when your interpreter lives elsewhere -- notably on Windows:
+
+```powershell
+# Windows (PowerShell)
+$env:NOTEBOOKLM_MCP_PYTHON = "venv\Scripts\python.exe"
 ```
+
+To register the server globally instead, so it is available from any project, use absolute paths:
+
+```bash
+# macOS / Linux
+claude mcp add notebooklm -- /path/to/repo/venv/bin/python /path/to/repo/notebooklm_mcp_server.py
+
+# Windows (PowerShell)
+claude mcp add notebooklm -- C:\path\to\repo\venv\Scripts\python.exe C:\path\to\repo\notebooklm_mcp_server.py
+```
+
+Point the command at the virtual environment's interpreter, not a bare `python` -- the ambient interpreter will not have `notebooklm-py` or the MCP SDK installed and the server will fail to start.
+
+Confirm registration with `claude mcp list`.
 
 ### HTTP Transport (MCP Inspector or remote access)
 
