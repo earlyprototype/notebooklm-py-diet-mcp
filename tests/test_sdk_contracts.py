@@ -13,8 +13,12 @@ import inspect
 from notebooklm._artifacts import ArtifactsAPI
 from notebooklm._chat import ChatAPI
 from notebooklm._notebooks import NotebooksAPI
-from notebooklm._research import ResearchAPI
 from notebooklm._sources import SourcesAPI
+
+try:
+    from notebooklm._research import ResearchAPI
+except ImportError:
+    from notebooklm._web.research import WebResearchAPI as ResearchAPI
 
 
 def _get_param_names(cls, method_name: str) -> list[str]:

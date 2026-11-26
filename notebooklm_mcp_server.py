@@ -19,6 +19,7 @@ Account selection:
 """
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
@@ -651,6 +652,13 @@ async def export_artifact(
 # ============================================================================
 
 
+def _research_field(response, name, default=None):
+    """Read a field from an SDK research dictionary or typed response."""
+    if isinstance(response, dict):
+        return response.get(name, default)
+    return getattr(response, name, default)
+
+
 @mcp.tool()
 async def research_and_import(
     notebook_id: str,
@@ -680,19 +688,34 @@ async def research_and_import(
     await ctx.info(f"Researching: {query}")
     try:
         task = await app.client.research.start(notebook_id, query, source=source)
-        task_id = task.task_id
+        task_id = _research_field(task, "task_id")
+        if not task_id:
+            return {"query": query, "error": "Research did not return a task ID."}
 
-        poll_result = None
-        for _ in range(60):
+        poll = app.client.research.poll
+        # Older SDKs poll the whole notebook and return its most recent task.
+        poll_kwargs = {"task_id": task_id} if "task_id" in inspect.signature(poll).parameters else {}
+        poll_limit = 60
+        for _ in range(poll_limit):
             await asyncio.sleep(2)
-            poll_result = await app.client.research.poll(notebook_id)
-            status = getattr(poll_result, "status", str(poll_result))
-            if status == "completed" or (isinstance(poll_result, dict) and poll_result.get("status") == "completed"):
+            poll_result = await poll(notebook_id, **poll_kwargs)
+            if _research_field(poll_result, "task_id", task_id) != task_id:
+                continue
+            error = _research_field(poll_result, "error")
+            if error:
+                return {"query": query, "error": str(error)}
+            status = _research_field(poll_result, "status")
+            if status == "completed":
                 break
+            if status not in ("in_progress", "pending", "running", "no_research", "not_found"):
+                reason = _research_field(poll_result, "termination_reason") or status or "missing status"
+                return {"query": query, "error": f"Research task {task_id} did not complete ({reason})."}
+        else:
+            return {"query": query, "error": f"Research task {task_id} timed out after {poll_limit} polls."}
 
-        results = getattr(poll_result, "results", [])
-        if isinstance(poll_result, dict):
-            results = poll_result.get("results", [])
+        results = _research_field(poll_result, "sources")
+        if results is None:
+            results = _research_field(poll_result, "results", [])
 
         to_import = results[:max_results] if results else []
         if to_import:

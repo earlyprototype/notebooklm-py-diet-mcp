@@ -195,8 +195,9 @@ def app_context(mock_client):
 
 
 @pytest.fixture
-def mock_ctx(app_context):
+def mock_ctx(app_context, monkeypatch):
     """Provide a mocked MCP Context wired to app_context."""
+    monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=False))
     ctx = MagicMock()
     ctx.request_context.lifespan_context = app_context
     ctx.info = AsyncMock()
