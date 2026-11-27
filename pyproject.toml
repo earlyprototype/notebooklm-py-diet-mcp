@@ -47,7 +47,7 @@ Repository = "https://github.com/earlyprototype/notebooklm-py-diet-mcp"
 [tool.hatch.build.targets.wheel]
 # Single-module project: the module name doesn't match the project name,
 # so hatchling needs to be told explicitly what ships in the wheel.
-only-include = ["notebooklm_mcp_server.py"]
+only-include = ["notebooklm_mcp_server.py", "templates/slide_styles.md"]
 
 [tool.ruff]
 target-version = "py310"

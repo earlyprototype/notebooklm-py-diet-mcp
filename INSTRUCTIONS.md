@@ -36,11 +36,11 @@ IMPORTANT - generate_and_download tool:
 - Generates an artifact and downloads it in one step
 - Supported artifact types: report, audio, slide_deck, quiz, infographic
 - Correct file extensions for output_path:
-    - report: .pdf
-    - audio: .wav
+    - report: .md (Markdown)
+    - audio: .m4a for MP4 audio. If the recording uses another encoding, use the extension returned in the error and retry with export_artifact and the generated artifact ID.
     - slide_deck: .pdf
     - quiz: depends on quiz_output_format param (.json, .md, .html)
-    - infographic: .pdf
+    - infographic: .png
 - Audio options: audio_format (deep-dive, brief, critique, debate), audio_length (short, medium, long)
 - Quiz options: quiz_quantity (few, standard, more), quiz_difficulty (easy, medium, hard)
 - Use instructions parameter to customise generation -- for slide decks, pass a design template to control visual style
@@ -49,6 +49,7 @@ IMPORTANT - generate_and_download tool:
 IMPORTANT - list_artifacts and export_artifact:
 - list_artifacts shows previously generated artifacts in a notebook (optionally filtered by type)
 - export_artifact downloads a specific artifact by ID to a file
+- Use .csv for a data table, .json for a mind map and .mp4 for a video. Flashcards accept the same formats as quizzes.
 - Use these to retrieve content that was generated previously without regenerating it
 
 IMPORTANT - research_and_import tool:

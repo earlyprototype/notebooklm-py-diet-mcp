@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from notebooklm import GenerationStatus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -30,11 +31,6 @@ class FakeSource:
 class FakeAnswer:
     answer: str
     citations: list
-
-
-@dataclass
-class FakeTaskStatus:
-    task_id: str
 
 
 @dataclass
@@ -118,18 +114,19 @@ def make_mock_client():
         "quiz",
     ):
         setattr(
-            client.artifacts, f"generate_{artifact}", AsyncMock(return_value=FakeTaskStatus(task_id=f"task-{artifact}"))
+            client.artifacts,
+            f"generate_{artifact}",
+            AsyncMock(return_value=GenerationStatus(f"task-{artifact}", "pending")),
         )
         setattr(client.artifacts, f"download_{artifact}", AsyncMock(return_value=None))
 
-    client.artifacts.wait_for_completion = AsyncMock(return_value=None)
+    client.artifacts.wait_for_completion = AsyncMock(
+        side_effect=lambda nb, task_id: GenerationStatus(task_id, "completed")
+    )
     client.artifacts.list = AsyncMock(return_value=[])
     client.artifacts.get = AsyncMock(return_value=SimpleNamespace(id="art-1", title="Artifact"))
     client.artifacts.delete = AsyncMock(return_value=None)
     client.artifacts.rename = AsyncMock(return_value=SimpleNamespace(id="art-1", title="Renamed"))
-    client.artifacts.export = AsyncMock(return_value=b"exported-data")
-    client.artifacts.export_report = AsyncMock(return_value=b"report-data")
-    client.artifacts.export_data_table = AsyncMock(return_value=b"table-data")
     client.artifacts.suggest_reports = AsyncMock(
         return_value=[
             SimpleNamespace(
@@ -145,9 +142,15 @@ def make_mock_client():
     )
 
     # ResearchAPI
-    client.research.start = AsyncMock(return_value=SimpleNamespace(task_id="research-1"))
-    client.research.poll = AsyncMock(return_value=SimpleNamespace(status="completed", results=["result1"]))
-    client.research.import_sources = AsyncMock(return_value={"imported": 2})
+    client.research.start = AsyncMock(return_value={"task_id": "research-1", "report_id": None})
+    client.research.poll = AsyncMock(
+        return_value={
+            "status": "completed",
+            "task_id": "research-1",
+            "sources": [{"url": f"https://example.org/{i}", "title": f"Source {i}"} for i in range(3)],
+        }
+    )
+    client.research.import_sources = AsyncMock(return_value=[{"id": "src-0", "title": "Source 0"}])
 
     # NotesAPI
     client.notes.list = AsyncMock(
@@ -195,8 +198,10 @@ def app_context(mock_client):
 
 
 @pytest.fixture
-def mock_ctx(app_context):
+def mock_ctx(app_context, monkeypatch, tmp_path):
     """Provide a mocked MCP Context wired to app_context."""
+    monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=False))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     ctx = MagicMock()
     ctx.request_context.lifespan_context = app_context
     ctx.info = AsyncMock()

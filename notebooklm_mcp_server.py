@@ -19,18 +19,20 @@ Account selection:
 """
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
-from notebooklm import NotebookLMClient
+from notebooklm import AudioFormat, AudioLength, NotebookLMClient, QuizDifficulty, QuizQuantity
 
 ACTIVE_PROFILE_PATH = Path.home() / ".notebooklm-active.json"
 
@@ -223,9 +225,10 @@ mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
 
 
 @mcp.resource("notebooklm://notebooks")
-async def list_notebooks(ctx: Context[ServerSession, AppContext]) -> str:
+async def list_notebooks() -> str:
     """List all NotebookLM notebooks with IDs and titles."""
-    app = ctx.request_context.lifespan_context
+    # FastMCP treats a resource function with any parameters as a URI template.
+    app = mcp.get_context().request_context.lifespan_context
     if app.client is None:
         return (
             "Not authenticated. Please call any tool (e.g. list_notebooks_tool) "
@@ -495,6 +498,75 @@ async def ask_question(
 # ============================================================================
 
 
+_DOWNLOAD_FORMATS = {
+    "audio": ("m4a", "mp3", "wav"),
+    "video": ("mp4",),
+    "report": ("markdown",),
+    "slide_deck": ("pdf",),
+    "quiz": ("json", "markdown", "html"),
+    "flashcards": ("json", "markdown", "html"),
+    "infographic": ("png",),
+    "data_table": ("csv",),
+    "mind_map": ("json",),
+}
+
+
+def _download_format(kind: str, path: str, requested: str) -> str:
+    formats = _DOWNLOAD_FORMATS.get(kind)
+    if not formats:
+        raise ValueError(f"Unsupported artifact type: {kind}")
+    aliases = {"md": "markdown"}
+    if kind == "audio":
+        aliases["mp4"] = "m4a"
+    suffix = Path(path).suffix.lower().lstrip(".")
+    extension = aliases.get(suffix, suffix)
+    requested = requested.lower()
+    fmt = aliases.get(requested, requested) or extension or formats[0]
+    if fmt not in formats:
+        raise ValueError(f"Unsupported format for {kind}: {fmt}. Use: {', '.join(formats)}")
+    if extension and extension != fmt:
+        raise ValueError(f"File extension .{suffix} does not match the requested {fmt} format")
+    return fmt
+
+
+def _generation_option(enum_type, value: str, **aliases):
+    name = value.lower().replace("-", "_")
+    try:
+        return enum_type[aliases.get(name, name).upper()]
+    except KeyError as e:
+        raise ValueError(f"Unsupported {enum_type.__name__} option: {value}") from e
+
+
+async def _download_artifact(artifacts, notebook_id: str, artifact_id: str, kind: str, path: str, fmt: str):
+    if not artifact_id:
+        raise ValueError("A download requires an artifact ID")
+    if kind == "audio":
+        # NotebookLM chooses the audio encoding. Publish the file only if its container matches.
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=destination.parent) as directory:
+            audio = Path(directory) / "audio"
+            await artifacts.download_audio(notebook_id, str(audio), artifact_id=artifact_id)
+            with audio.open("rb") as stream:
+                header = stream.read(12)
+            if header[4:8] == b"ftyp":
+                native = "m4a"
+            elif header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+                native = "wav"
+            elif header.startswith(b"ID3") or int.from_bytes(header[:2], "big") & 0xFFE0 == 0xFFE0:
+                native = "mp3"
+            else:
+                raise ValueError("Unrecognized audio format in download")
+            if native != fmt:
+                raise ValueError(f"NotebookLM supplied {native} audio. Use the {native} output format.")
+            audio.replace(destination)
+        return
+
+    download = getattr(artifacts, f"download_{kind}")
+    options = {"output_format": fmt} if kind in ("quiz", "flashcards") else {}
+    await download(notebook_id, path, artifact_id=artifact_id, **options)
+
+
 @mcp.tool()
 async def generate_and_download(
     notebook_id: str,
@@ -516,8 +588,9 @@ async def generate_and_download(
         notebook_id: ID of the notebook
         artifact_type: One of: report, audio, slide_deck, quiz, infographic
         output_path: Path where to save the downloaded file. Use the correct
-            extension: .pdf (report, slide_deck, infographic), .wav (audio),
-            .json/.md/.html (quiz, based on quiz_output_format)
+            extension: .md (report), .pdf (slide_deck), .png (infographic),
+            .m4a (native audio), .json/.md/.html (quiz, based on quiz_output_format).
+            If NotebookLM supplies another audio encoding, the error gives its extension.
         instructions: Custom instructions for generation (optional).
             For slide decks, pass a design template here to control visual style.
         audio_format: Audio format: deep-dive, brief, critique, debate
@@ -540,14 +613,16 @@ async def generate_and_download(
 
     await ctx.info(f"Generating {artifact_type}...")
 
+    artifact_id = None
     try:
+        fmt = _download_format(artifact_type, output_path, quiz_output_format if artifact_type == "quiz" else "")
         gen_kwargs: dict = {}
         if instructions:
             gen_kwargs["instructions"] = instructions
 
         if artifact_type == "audio":
-            gen_kwargs["audio_format"] = audio_format
-            gen_kwargs["audio_length"] = audio_length
+            gen_kwargs["audio_format"] = _generation_option(AudioFormat, audio_format)
+            gen_kwargs["audio_length"] = _generation_option(AudioLength, audio_length, medium="default")
             status = await app.client.artifacts.generate_audio(notebook_id, **gen_kwargs)
         elif artifact_type == "report":
             report_kwargs: dict = {}
@@ -557,31 +632,32 @@ async def generate_and_download(
         elif artifact_type == "slide_deck":
             status = await app.client.artifacts.generate_slide_deck(notebook_id, **gen_kwargs)
         elif artifact_type == "quiz":
-            gen_kwargs["quantity"] = quiz_quantity
-            gen_kwargs["difficulty"] = quiz_difficulty
+            gen_kwargs["quantity"] = _generation_option(QuizQuantity, quiz_quantity, few="fewer")
+            gen_kwargs["difficulty"] = _generation_option(QuizDifficulty, quiz_difficulty)
             status = await app.client.artifacts.generate_quiz(notebook_id, **gen_kwargs)
         elif artifact_type == "infographic":
             status = await app.client.artifacts.generate_infographic(notebook_id, **gen_kwargs)
 
+        if not status.task_id or status.is_failed:
+            raise ValueError(status.error or "Artifact generation did not start")
+        artifact_id = status.task_id
         await ctx.info(f"Waiting for {artifact_type} generation to complete...")
-        await app.client.artifacts.wait_for_completion(notebook_id, status.task_id)
+        completed = await app.client.artifacts.wait_for_completion(notebook_id, artifact_id)
+        if not completed.is_complete or completed.task_id != artifact_id:
+            raise ValueError(completed.error or f"Artifact {artifact_id} did not complete")
 
         await ctx.info(f"Downloading {artifact_type} to {output_path}...")
-        if artifact_type == "audio":
-            await app.client.artifacts.download_audio(notebook_id, output_path)
-        elif artifact_type == "report":
-            await app.client.artifacts.download_report(notebook_id, output_path)
-        elif artifact_type == "slide_deck":
-            await app.client.artifacts.download_slide_deck(notebook_id, output_path)
-        elif artifact_type == "quiz":
-            await app.client.artifacts.download_quiz(notebook_id, output_path, output_format=quiz_output_format)
-        elif artifact_type == "infographic":
-            await app.client.artifacts.download_infographic(notebook_id, output_path)
+        await _download_artifact(app.client.artifacts, notebook_id, artifact_id, artifact_type, output_path, fmt)
 
-        return {"artifact_type": artifact_type, "output_path": output_path, "success": True}
+        return {
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+            "output_path": output_path,
+            "success": True,
+        }
 
     except Exception as e:
-        return {"artifact_type": artifact_type, "error": str(e)}
+        return {"artifact_type": artifact_type, "artifact_id": artifact_id, "error": str(e)}
 
 
 @mcp.tool()
@@ -628,7 +704,10 @@ async def export_artifact(
         notebook_id: ID of the notebook
         artifact_id: ID of the artifact to export
         output_path: Path where to save the exported file
-        export_format: Desired format (pdf, csv, json, etc.). Leave empty for default.
+        export_format: File format. Slide decks use PDF, reports Markdown, infographics PNG,
+            data tables CSV, mind maps JSON, video MP4 and audio its native encoding.
+            Quizzes and flashcards support JSON, Markdown and HTML.
+            Leave empty to infer from output_path or use the default.
 
     Returns:
         Dictionary with export status
@@ -638,17 +717,48 @@ async def export_artifact(
         return {"error": "Authentication failed. Please check the logs."}
 
     await ctx.info(f"Exporting artifact to: {output_path}")
-    export_kwargs: dict = {"artifact_id": artifact_id}
-    if export_format:
-        export_kwargs["export_type"] = export_format
-    data = await app.client.artifacts.export(notebook_id, **export_kwargs)
-    Path(output_path).write_bytes(data if isinstance(data, bytes) else str(data).encode("utf-8"))
-    return {"output_path": output_path, "success": True}
+    try:
+        artifact = await app.client.artifacts.get(notebook_id, artifact_id)
+        if artifact is None:
+            return {"error": f"Artifact {artifact_id} not found"}
+        kind = artifact.kind.value
+        fmt = _download_format(kind, output_path, export_format)
+        await _download_artifact(app.client.artifacts, notebook_id, artifact_id, kind, output_path, fmt)
+        return {"artifact_id": artifact_id, "output_path": output_path, "success": True}
+    except Exception as e:
+        return {"artifact_id": artifact_id, "error": str(e)}
 
 
 # ============================================================================
 # TOOLS -- Research
 # ============================================================================
+
+
+RESEARCH_TIMEOUT = 120
+
+
+def _research_field(response, name: str):
+    # SDK 0.3.2 returns dicts. Newer releases expose the same fields as attributes.
+    return response.get(name) if isinstance(response, dict) else getattr(response, name, None)
+
+
+async def _poll_research(research, notebook_id: str, task_id: str) -> Sequence:
+    # SDK 0.3.2 only accepts notebook_id and reports the most recent task.
+    kwargs = {"task_id": task_id} if "task_id" in inspect.signature(research.poll).parameters else {}
+    for _ in range(60):
+        await asyncio.sleep(2)
+        result = await research.poll(notebook_id, **kwargs)
+        polled_id = _research_field(result, "task_id")
+        if not polled_id:
+            raise ValueError(f"Research task {task_id} not found")
+        if polled_id != task_id:
+            raise ValueError(f"Expected research task {task_id}, received {polled_id}")
+        status = _research_field(result, "status")
+        if status == "completed":
+            return result["sources"] if isinstance(result, dict) else result.sources
+        if status not in ("in_progress", "pending"):
+            raise ValueError(f"Research task {task_id} returned status {status}")
+    raise asyncio.TimeoutError
 
 
 @mcp.tool()
@@ -678,23 +788,21 @@ async def research_and_import(
         return {"error": "Authentication failed. Please check the logs."}
 
     await ctx.info(f"Researching: {query}")
+    if max_results < 0:
+        return {"query": query, "imported": 0, "error": "max_results must be nonnegative"}
     try:
         task = await app.client.research.start(notebook_id, query, source=source)
-        task_id = task.task_id
+        task_id = _research_field(task, "task_id")
+        if not task_id:
+            return {"query": query, "imported": 0, "error": "Research start returned no task ID"}
+        results = await asyncio.wait_for(_poll_research(app.client.research, notebook_id, task_id), RESEARCH_TIMEOUT)
+    except asyncio.TimeoutError:
+        return {"query": query, "imported": 0, "error": "Research timed out"}
+    except Exception as e:
+        return {"query": query, "imported": 0, "error": str(e)}
 
-        poll_result = None
-        for _ in range(60):
-            await asyncio.sleep(2)
-            poll_result = await app.client.research.poll(notebook_id)
-            status = getattr(poll_result, "status", str(poll_result))
-            if status == "completed" or (isinstance(poll_result, dict) and poll_result.get("status") == "completed"):
-                break
-
-        results = getattr(poll_result, "results", [])
-        if isinstance(poll_result, dict):
-            results = poll_result.get("results", [])
-
-        to_import = results[:max_results] if results else []
+    try:
+        to_import = results[:max_results]
         if to_import:
             await ctx.info(f"Importing {len(to_import)} sources...")
             import_result = await app.client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
@@ -704,7 +812,7 @@ async def research_and_import(
         return {
             "query": query,
             "results_found": len(results),
-            "imported": len(to_import),
+            "imported": len(import_result) if to_import else 0,
             "import_details": import_result,
             "success": True,
         }
