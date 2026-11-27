@@ -54,8 +54,9 @@ IMPORTANT - list_artifacts and export_artifact:
 IMPORTANT - research_and_import tool:
 - Researches a topic and imports the results as notebook sources in a single call
 - Params: query (search terms), source ("web" or "drive"), max_results (default 5)
-- The tool starts the research, polls until complete, and imports the top results automatically
-- This replaces the manual three-step workflow of start -> poll -> import
+- The tool imports results only after the SDK reports completion for the task it started. Errors and cancellations stop polling. If the task is still pending or missing after 60 polls, the tool reports a timeout.
+- Failed calls set the MCP `isError` flag and include the reason in the JSON text. If the SDK confirms only some imports, the response includes the confirmed count and import details.
+- Switching accounts during polling interrupts the call. To research in the newly selected account, start a new call with a notebook ID from that account.
 
 IMPORTANT - PDF / PNG conversion utilities:
 - pdf_to_png: Converts a PDF into individual PNG images (one per page). Use this to make slide deck pages visible to LLMs for visual review or editing. Default DPI of 200 balances quality and file size; increase for higher fidelity if needed. Output goes to a <filename>_pages/ folder beside the PDF by default.

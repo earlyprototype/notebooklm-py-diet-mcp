@@ -23,10 +23,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "notebooklm-py[browser]>=0.3.2",
+    "notebooklm-py[browser]>=0.8.6",
     # MCP SDK 2.0 removed mcp.server.fastmcp (replaced by mcp.server.mcpserver),
     # which this server is built on. Stay on the 1.x line until it is ported.
-    "mcp[cli]>=1.0.0,<2.0.0",
+    # FastMCP 1.19 supports returning CallToolResult with an explicit error flag.
+    "mcp[cli]>=1.19.0,<2.0.0",
     "pymupdf>=1.24.0",
 ]
 
@@ -39,7 +40,7 @@ dev = [
 ]
 
 [project.scripts]
-notebooklm-mcp = "notebooklm_mcp_server:mcp.run"
+notebooklm-diet-mcp = "notebooklm_mcp_server:mcp.run"
 
 [project.urls]
 Repository = "https://github.com/earlyprototype/notebooklm-py-diet-mcp"

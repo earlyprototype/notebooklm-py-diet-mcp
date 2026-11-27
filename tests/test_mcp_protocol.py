@@ -4,15 +4,14 @@ These tests verify that every tool is invocable through the MCP JSON-RPC
 protocol layer, exactly as Cursor or Claude Code would call them. This
 catches JSON Schema issues and parameter serialisation bugs.
 
-Rather than patching the production server (which has lifespan binding
-issues with anyio), we build a lightweight test server that re-registers
-the same tool functions against a fresh FastMCP instance with a mock
-lifespan.
+The general invocation tests use a fresh FastMCP server with a mock lifespan.
+Research tests use the production registration with a mocked NotebookLM client.
 """
 
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -31,9 +30,10 @@ from notebooklm_mcp_server import (
     list_artifacts,
     list_notebooks_tool,
     list_sources,
+    mcp,
     pdf_to_png,
     png_to_pdf,
-    research_and_import,
+    research_and_import_tool,
     switch_account,
 )
 
@@ -90,7 +90,7 @@ def _build_test_server() -> FastMCP:
         generate_and_download,
         list_artifacts,
         export_artifact,
-        research_and_import,
+        research_and_import_tool,
         get_account_info,
         switch_account,
         create_profile,
@@ -221,3 +221,64 @@ class TestProtocolToolInvocation:
                 violations.append(f"{tool.name}.{param_name}: {json.dumps(param_schema)}")
 
         assert not violations, "Complex parameter types found in MCP tool schemas:\n" + "\n".join(violations)
+
+
+class TestResearchProtocol:
+    @pytest.fixture
+    def call_research(self, tmp_path, mock_client, monkeypatch):
+        state = tmp_path / ".notebooklm" / "profiles" / "default" / "storage_state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+        monkeypatch.setattr("notebooklm_mcp_server.NotebookLMClient.from_storage", AsyncMock(return_value=mock_client))
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=False))
+        monkeypatch.setattr("notebooklm_mcp_server.asyncio", SimpleNamespace(sleep=AsyncMock()))
+
+        async def call():
+            async with create_connected_server_and_client_session(mcp, raise_exceptions=True) as session:
+                return await session.call_tool("research_and_import", {"notebook_id": "nb-1", "query": "test"})
+
+        return call
+
+    @pytest.mark.parametrize(
+        ("status", "polls", "diagnostic"),
+        [
+            ("in_progress", 60, "timed out after 60 polls. Its outcome is unknown."),
+            ("failed", 1, "did not complete (failed)."),
+        ],
+        ids=["timeout", "terminal-failure"],
+    )
+    async def test_failed_polling(self, call_research, mock_client, status, polls, diagnostic):
+        mock_client.research.poll.return_value = {
+            "task_id": "research-1",
+            "status": status,
+            "sources": [{"url": "https://example.com/partial"}],
+        }
+
+        result = await call_research()
+
+        assert mock_client.research.poll.await_count == polls
+        mock_client.research.import_sources.assert_not_called()
+        payload = json.loads(result.content[0].text)
+        assert diagnostic in payload["error"]
+        assert result.isError is True
+
+    async def test_confirmed_import(self, call_research, mock_client):
+        result = await call_research()
+
+        mock_client.research.import_sources.assert_awaited_once()
+        assert result.isError is False
+        payload = json.loads(result.content[0].text)
+        assert payload["success"] is True
+        assert payload["imported"] == 1
+
+    async def test_partial_import(self, call_research, mock_client):
+        mock_client.research.poll.return_value["sources"].append({"url": "https://example.com/second"})
+
+        result = await call_research()
+
+        payload = json.loads(result.content[0].text)
+        assert payload["results_found"] == 2
+        assert payload["imported"] == 1
+        assert len(payload["import_details"]) == 1
+        assert "confirmed 1 of 2" in payload["error"]
+        assert result.isError is True

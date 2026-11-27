@@ -61,9 +61,17 @@ notebooklm login
 notebooklm list
 ```
 
-You can authenticate multiple accounts by changing `NOTEBOOKLM_HOME` to a different directory for each (e.g. `~/.notebooklm-personal`, `~/.notebooklm-design`).
+Use a separate `NOTEBOOKLM_HOME` for each account, such as `~/.notebooklm` for personal and `~/.notebooklm-design` for design. SDK 0.8.6 stores a fresh default session at `profiles/default/storage_state.json` inside that directory. The SDK also recognizes the older `storage_state.json` at the account root.
+
+At startup, `NOTEBOOKLM_AUTH_JSON` takes precedence over a saved session and works even if the SDK cannot read the account's `config.json`. Use `switch_account` to select a file-backed session at runtime. Unset `NOTEBOOKLM_AUTH_JSON` before restarting to keep using that saved account. `get_account_info` reports the authentication source and lists accounts with usable storage paths. If the active SDK profile is invalid, you can still use these tools to select another account.
+
+Each HTTP session keeps its own account selection. SDK-backed requests take turns because SDK 0.8.6 reads the process environment during refresh. Research releases the SDK between polls. If you switch accounts in that interval, the research call reports an interruption and skips import.
 
 ## Server Configuration
+
+If an existing configuration uses the `notebooklm-mcp` command, reinstall the diet package with `pip install -e .` and replace the command with the virtual environment's `bin/notebooklm-diet-mcp` or `Scripts\notebooklm-diet-mcp.exe` on Windows. Restart the MCP client and confirm that `research_and_import` appears in its tool list. The SDK uses `notebooklm-mcp` for its own server. The Python script configurations below also launch the diet server.
+
+If you also use the SDK server, upgrading the diet package can remove the old shared executable. To restore it, check the SDK version with `pip show notebooklm-py`, then run `pip install --force-reinstall --no-deps "notebooklm-py==<installed-version>"` in the same environment.
 
 ### Cursor
 

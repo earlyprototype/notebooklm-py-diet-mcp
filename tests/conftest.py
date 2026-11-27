@@ -14,6 +14,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    """Keep account discovery and SDK state inside the temporary test home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path / ".notebooklm"))
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+    monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", tmp_path / ".notebooklm-active.json")
+
+
 @dataclass
 class FakeNotebook:
     id: str
@@ -146,8 +157,14 @@ def make_mock_client():
 
     # ResearchAPI
     client.research.start = AsyncMock(return_value=SimpleNamespace(task_id="research-1"))
-    client.research.poll = AsyncMock(return_value=SimpleNamespace(status="completed", results=["result1"]))
-    client.research.import_sources = AsyncMock(return_value={"imported": 2})
+    client.research.poll = AsyncMock(
+        return_value={
+            "task_id": "research-1",
+            "status": "completed",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+        }
+    )
+    client.research.import_sources = AsyncMock(return_value=[{"id": "src-new", "title": "Example"}])
 
     # NotesAPI
     client.notes.list = AsyncMock(
@@ -195,8 +212,9 @@ def app_context(mock_client):
 
 
 @pytest.fixture
-def mock_ctx(app_context):
+def mock_ctx(app_context, monkeypatch):
     """Provide a mocked MCP Context wired to app_context."""
+    monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=False))
     ctx = MagicMock()
     ctx.request_context.lifespan_context = app_context
     ctx.info = AsyncMock()

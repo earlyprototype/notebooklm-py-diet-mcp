@@ -7,8 +7,8 @@ other MCP-compatible clients.
 Built on top of notebooklm-py: https://github.com/teng-lin/notebooklm-py
 
 Requires:
-    - notebooklm-py >= 0.3.2
-    - mcp[cli] >= 1.0.0
+    - notebooklm-py >= 0.8.6
+    - mcp[cli] >= 1.19.0, < 2.0.0
     - A valid NotebookLM authentication session (run: notebooklm login)
 
 Account selection:
@@ -23,16 +23,24 @@ import json
 import os
 import subprocess
 import sys
+from asyncio import CancelledError
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 
+from anyio import CancelScope
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import CallToolResult, TextContent
 from notebooklm import NotebookLMClient
+from notebooklm.paths import _reset_config_cache, get_home_dir, get_storage_path, resolve_profile
 
 ACTIVE_PROFILE_PATH = Path.home() / ".notebooklm-active.json"
+# SDK 0.8.6 reads the process environment even during mid-request refresh.
+_SDK_LOCK = asyncio.Lock()
 
 DEFAULT_PROFILES = {
     "personal": ".notebooklm",
@@ -47,6 +55,46 @@ def _resolve_profile_dir(name: str) -> Path:
         return Path(name)
     suffix = DEFAULT_PROFILES.get(name.lower(), f".notebooklm-{name.lower()}")
     return Path.home() / suffix
+
+
+def _set_sdk_home(home: str | None) -> None:
+    if home is None:
+        os.environ.pop("NOTEBOOKLM_HOME", None)
+    else:
+        os.environ["NOTEBOOKLM_HOME"] = home
+    # SDK 0.8.6 caches default_profile by config mtime across all homes.
+    _reset_config_cache()
+
+
+@contextmanager
+def _sdk_home(profile_dir: Path, sdk_profile: str | None = None):
+    """Bind SDK path and refresh routing while the caller owns _SDK_LOCK."""
+    previous_home = os.environ.get("NOTEBOOKLM_HOME")
+    previous_profile = os.environ.get("NOTEBOOKLM_PROFILE")
+    try:
+        _set_sdk_home(str(profile_dir))
+        selected = resolve_profile(sdk_profile)
+        os.environ["NOTEBOOKLM_PROFILE"] = selected
+        yield selected
+    finally:
+        _set_sdk_home(previous_home)
+        if previous_profile is None:
+            os.environ.pop("NOTEBOOKLM_PROFILE", None)
+        else:
+            os.environ["NOTEBOOKLM_PROFILE"] = previous_profile
+
+
+def _storage_path(profile_dir: Path) -> Path:
+    with _sdk_home(profile_dir):
+        return get_storage_path()
+
+
+def _profile_name_for_dir(directory: Path) -> str:
+    for name, suffix in DEFAULT_PROFILES.items():
+        if directory == Path.home() / suffix:
+            return name
+    name = directory.name.removeprefix(".notebooklm-")
+    return name if _resolve_profile_dir(name) == directory else str(directory)
 
 
 def _read_active_profile() -> str | None:
@@ -72,15 +120,7 @@ def _current_profile_name() -> str:
     if saved:
         return saved
 
-    home = os.environ.get("NOTEBOOKLM_HOME", "")
-    if home:
-        folder = os.path.basename(os.path.expanduser(home))
-        for name, suffix in DEFAULT_PROFILES.items():
-            if folder == suffix:
-                return name
-        return folder.replace(".notebooklm-", "").replace(".notebooklm", "personal")
-
-    return "personal"
+    return _profile_name_for_dir(get_home_dir()) if os.environ.get("NOTEBOOKLM_HOME") else "personal"
 
 
 @dataclass
@@ -89,6 +129,45 @@ class AppContext:
 
     client: NotebookLMClient | None
     profile: str
+    inline_auth: bool = False
+    sdk_profile: str | None = None
+
+    @asynccontextmanager
+    async def suspend_for_switch(self):
+        """Flush the old session before opening its replacement. Reopen it on failure."""
+        if self.client is None:
+            yield
+            return
+        with _sdk_home(_resolve_profile_dir(self.profile), self.sdk_profile):
+            try:
+                with CancelScope(shield=True):
+                    await self.client.__aexit__(None, None, None)
+                yield
+            except BaseException:
+                if not self.client.is_connected:
+                    with CancelScope(shield=True):
+                        await self.client.__aenter__()
+                raise
+
+    @asynccontextmanager
+    async def sdk_session(self, expected_client: NotebookLMClient | None = None):
+        async with _SDK_LOCK:
+            if expected_client is not None and self.client is not expected_client:
+                raise RuntimeError("Research interrupted because the active account session changed.")
+            with _sdk_home(_resolve_profile_dir(self.profile), self.sdk_profile):
+                try:
+                    yield self.client
+                except CancelledError:
+                    # The SDK shields its shared refresh task from caller cancellation.
+                    # Settle that task before another account can use the environment.
+                    if self.client is not None:
+                        with CancelScope(shield=True):
+                            try:
+                                await self.client.close(drain=False)
+                                await self.client.__aenter__()
+                            except Exception:
+                                self.client = None
+                    raise
 
 
 def _find_cli() -> Path | None:
@@ -112,6 +191,7 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
 
     env = os.environ.copy()
     env["NOTEBOOKLM_HOME"] = str(target_dir)
+    env.pop("NOTEBOOKLM_AUTH_JSON", None)
 
     if ctx:
         await ctx.info(
@@ -131,6 +211,7 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
             asyncio.get_event_loop().run_in_executor(None, process.communicate),
             timeout=300,
         )
+        return process.returncode == 0 and _storage_path(target_dir).is_file()
     except asyncio.TimeoutError:
         with suppress(Exception):
             process.kill()
@@ -138,15 +219,11 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
     except Exception:
         return False
 
-    storage_file = target_dir / "storage_state.json"
-    return storage_file.exists() and process.returncode == 0
 
-
-async def _create_client(profile: str) -> NotebookLMClient:
+async def _create_client(profile: str, *, inline_auth: bool = False) -> NotebookLMClient:
     """Create and initialise a NotebookLM client for the given profile."""
-    profile_dir = _resolve_profile_dir(profile)
-    os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
-    client = await NotebookLMClient.from_storage()
+    path = None if inline_auth else str(_storage_path(_resolve_profile_dir(profile)))
+    client = await NotebookLMClient.from_storage(path=path)
     if hasattr(client, "__aenter__"):
         await client.__aenter__()
     return client
@@ -170,6 +247,10 @@ async def _ensure_authenticated(
         except Exception:
             pass
 
+    if app.inline_auth:
+        await ctx.error("Update NOTEBOOKLM_AUTH_JSON and restart, or use switch_account to select a saved session.")
+        return False
+
     if app.client is None:
         await ctx.info(
             "No credentials found. Launching browser for authentication -- please sign into your Google account."
@@ -185,33 +266,53 @@ async def _ensure_authenticated(
     if app.client is not None:
         with suppress(Exception):
             await app.client.__aexit__(None, None, None)
+        app.client = None
 
     app.client = await _create_client(app.profile)
+    app.sdk_profile = resolve_profile()
     await ctx.info("Authentication successful. Resuming operation.")
     return True
 
 
+def _account_request(handler):
+    """Keep the selected SDK environment in scope for the whole MCP request."""
+    parameters = signature(handler)
+
+    @wraps(handler)
+    async def routed(*args, **kwargs):
+        ctx = parameters.bind(*args, **kwargs).arguments["ctx"]
+        async with ctx.request_context.lifespan_context.sdk_session():
+            return await handler(*args, **kwargs)
+
+    return routed
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage NotebookLM client lifecycle."""
-    profile = _current_profile_name()
-    profile_dir = _resolve_profile_dir(profile)
-    storage_file = profile_dir / "storage_state.json"
-
-    client = None
-    if storage_file.exists():
-        try:
-            client = await _create_client(profile)
-        except Exception:
-            client = None
-
-    ctx = AppContext(client=client, profile=profile)
+    """Manage the client owned by one MCP session."""
+    async with _SDK_LOCK:
+        profile = _current_profile_name()
+        ctx = AppContext(client=None, profile=profile, inline_auth="NOTEBOOKLM_AUTH_JSON" in os.environ)
+        if ctx.inline_auth:
+            # Inline sessions have no storage file. Bind their SDK calls without reading config.json.
+            ctx.sdk_profile = os.environ.get("NOTEBOOKLM_PROFILE") or "default"
+        # Keep account management available when the SDK rejects the active profile.
+        with suppress(Exception), _sdk_home(_resolve_profile_dir(profile), ctx.sdk_profile) as sdk_profile:
+            if ctx.inline_auth:
+                ctx.client = await _create_client(profile, inline_auth=True)
+            elif get_storage_path().is_file():
+                ctx.client = await _create_client(profile)
+            if ctx.client is not None:
+                ctx.sdk_profile = sdk_profile
     try:
         yield ctx
     finally:
-        if ctx.client is not None:
-            with suppress(Exception):
-                await ctx.client.__aexit__(None, None, None)
+        with CancelScope(shield=True):
+            async with _SDK_LOCK:
+                if ctx.client is not None:
+                    with _sdk_home(_resolve_profile_dir(ctx.profile), ctx.sdk_profile), suppress(Exception):
+                        await ctx.client.__aexit__(None, None, None)
+                    ctx.client = None
 
 
 mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
@@ -223,6 +324,7 @@ mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
 
 
 @mcp.resource("notebooklm://notebooks")
+@_account_request
 async def list_notebooks(ctx: Context[ServerSession, AppContext]) -> str:
     """List all NotebookLM notebooks with IDs and titles."""
     app = ctx.request_context.lifespan_context
@@ -251,6 +353,7 @@ async def list_notebooks(ctx: Context[ServerSession, AppContext]) -> str:
 
 
 @mcp.resource("notebooklm://notebook/{notebook_id}")
+@_account_request
 async def get_notebook_info(notebook_id: str, ctx: Context[ServerSession, AppContext]) -> str:
     """Get detailed information about a specific notebook."""
     app = ctx.request_context.lifespan_context
@@ -291,6 +394,7 @@ async def get_notebook_info(notebook_id: str, ctx: Context[ServerSession, AppCon
 
 
 @mcp.tool()
+@_account_request
 async def list_notebooks_tool(ctx: Context[ServerSession, AppContext]) -> dict:
     """List all NotebookLM notebooks.
 
@@ -307,6 +411,7 @@ async def list_notebooks_tool(ctx: Context[ServerSession, AppContext]) -> dict:
 
 
 @mcp.tool()
+@_account_request
 async def create_notebook(title: str, ctx: Context[ServerSession, AppContext]) -> dict:
     """Create a new NotebookLM notebook.
 
@@ -332,6 +437,7 @@ async def create_notebook(title: str, ctx: Context[ServerSession, AppContext]) -
 
 
 @mcp.tool()
+@_account_request
 async def list_sources(
     notebook_id: str,
     ctx: Context[ServerSession, AppContext] = None,
@@ -364,6 +470,7 @@ async def list_sources(
 
 
 @mcp.tool()
+@_account_request
 async def add_sources(
     notebook_id: str,
     sources: str,
@@ -429,6 +536,7 @@ async def add_sources(
 
 
 @mcp.tool()
+@_account_request
 async def ask_question(
     notebook_id: str,
     question: str,
@@ -496,6 +604,7 @@ async def ask_question(
 
 
 @mcp.tool()
+@_account_request
 async def generate_and_download(
     notebook_id: str,
     artifact_type: str,
@@ -585,6 +694,7 @@ async def generate_and_download(
 
 
 @mcp.tool()
+@_account_request
 async def list_artifacts(
     notebook_id: str,
     artifact_type: str = "",
@@ -613,6 +723,7 @@ async def list_artifacts(
 
 
 @mcp.tool()
+@_account_request
 async def export_artifact(
     notebook_id: str,
     artifact_id: str,
@@ -651,7 +762,13 @@ async def export_artifact(
 # ============================================================================
 
 
-@mcp.tool()
+def _research_field(response, name, default=None):
+    """Read a field from an SDK research dictionary or typed response."""
+    if isinstance(response, dict):
+        return response.get(name, default)
+    return getattr(response, name, default)
+
+
 async def research_and_import(
     notebook_id: str,
     query: str,
@@ -674,43 +791,81 @@ async def research_and_import(
         Dictionary with research results and import status
     """
     app = ctx.request_context.lifespan_context
-    if not await _ensure_authenticated(app, ctx):
-        return {"error": "Authentication failed. Please check the logs."}
-
-    await ctx.info(f"Researching: {query}")
     try:
-        task = await app.client.research.start(notebook_id, query, source=source)
-        task_id = task.task_id
+        async with app.sdk_session():
+            if not await _ensure_authenticated(app, ctx):
+                return {"error": "Authentication failed. Please check the logs."}
+            client = app.client
+            await ctx.info(f"Researching: {query}")
+            task = await client.research.start(notebook_id, query, source=source)
+        task_id = _research_field(task, "task_id")
+        if not task_id:
+            return {"query": query, "error": "Research did not return a task ID."}
 
-        poll_result = None
-        for _ in range(60):
+        poll_limit = 60
+        for _ in range(poll_limit):
             await asyncio.sleep(2)
-            poll_result = await app.client.research.poll(notebook_id)
-            status = getattr(poll_result, "status", str(poll_result))
-            if status == "completed" or (isinstance(poll_result, dict) and poll_result.get("status") == "completed"):
-                break
+            async with app.sdk_session(client):
+                poll_result = await client.research.poll(notebook_id, task_id=task_id)
+            polled_id = _research_field(poll_result, "task_id")
+            if polled_id is not None and polled_id != task_id:
+                continue
+            error = _research_field(poll_result, "error")
+            if error:
+                return {"query": query, "error": str(error)}
+            status = _research_field(poll_result, "status")
+            if status == "completed":
+                if polled_id == task_id:
+                    break
+                continue
+            if status not in ("in_progress", "pending", "running", "no_research", "not_found"):
+                reason = _research_field(poll_result, "termination_reason") or status or "missing status"
+                return {"query": query, "error": f"Research task {task_id} did not complete ({reason})."}
+        else:
+            return {
+                "query": query,
+                "error": f"Polling task {task_id} timed out after {poll_limit} polls. Its outcome is unknown.",
+            }
 
-        results = getattr(poll_result, "results", [])
-        if isinstance(poll_result, dict):
-            results = poll_result.get("results", [])
+        results = _research_field(poll_result, "sources")
+        if results is None:
+            results = _research_field(poll_result, "results", [])
 
         to_import = results[:max_results] if results else []
         if to_import:
             await ctx.info(f"Importing {len(to_import)} sources...")
-            import_result = await app.client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
+            async with app.sdk_session(client):
+                import_result = await client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
+            imported = len({source["id"] for source in import_result})
         else:
             import_result = {"imported": 0}
+            imported = 0
 
-        return {
+        result = {
             "query": query,
             "results_found": len(results),
-            "imported": len(to_import),
+            "imported": imported,
             "import_details": import_result,
-            "success": True,
+            "success": imported == len(to_import),
         }
+        if not result["success"]:
+            result["error"] = f"The SDK confirmed {imported} of {len(to_import)} requested source imports."
+        return result
 
     except Exception as e:
         return {"query": query, "error": str(e)}
+
+
+@mcp.tool()
+@wraps(research_and_import)
+async def research_and_import_tool(*args, **kwargs):
+    payload = await research_and_import(*args, **kwargs)
+    if "error" in payload:
+        return CallToolResult(
+            isError=True,
+            content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))],
+        )
+    return payload
 
 
 # ============================================================================
@@ -727,22 +882,19 @@ async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
         and instructions for switching or adding accounts.
     """
     app = ctx.request_context.lifespan_context
-    profile_dir = _resolve_profile_dir(app.profile)
-
-    available = {}
-    for name, suffix in DEFAULT_PROFILES.items():
-        path = Path.home() / suffix
-        if path.exists() and (path / "storage_state.json").exists():
-            available[name] = str(path)
-
-    for p in Path.home().glob(".notebooklm-*"):
-        if p.is_dir() and (p / "storage_state.json").exists():
-            label = p.name.replace(".notebooklm-", "")
-            if label not in available:
-                available[label] = str(p)
+    async with _SDK_LOCK:
+        profile_dir = _resolve_profile_dir(app.profile)
+        home = Path.home()
+        candidates = {profile_dir, home / DEFAULT_PROFILES["personal"], *home.glob(".notebooklm-*")}
+        available = {}
+        for path in sorted(candidates):
+            with suppress(OSError, ValueError, RuntimeError):
+                if path.is_dir() and _storage_path(path).is_file():
+                    available[_profile_name_for_dir(path)] = str(path)
 
     return {
         "current_account": app.profile,
+        "auth_source": "NOTEBOOKLM_AUTH_JSON" if app.inline_auth else "storage_state.json",
         "config_path": str(profile_dir),
         "available_profiles": available,
         "switch_instructions": (
@@ -766,8 +918,8 @@ async def switch_account(
 ) -> dict:
     """Switch the active NotebookLM account to a different Google profile.
 
-    The change takes effect immediately and is persisted across server
-    restarts. Use get_account_info to see available profiles.
+    The selection applies to this session and persists across server restarts.
+    Use get_account_info to see available profiles.
 
     Args:
         profile: Profile name to switch to (e.g. 'work', 'personal',
@@ -778,26 +930,37 @@ async def switch_account(
     """
     app = ctx.request_context.lifespan_context
     target_dir = _resolve_profile_dir(profile)
-    storage_file = target_dir / "storage_state.json"
 
-    if not storage_file.exists():
-        return {
-            "success": False,
-            "error": f"No credentials found for profile '{profile}' at {target_dir}",
-            "hint": (f"Authenticate first by running:\n  NOTEBOOKLM_HOME={target_dir} notebooklm login"),
-        }
+    async with _SDK_LOCK:
+        try:
+            with _sdk_home(target_dir) as target_sdk_profile:
+                has_storage = get_storage_path().is_file()
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {"success": False, "error": f"Cannot resolve storage for profile '{profile}': {exc}"}
+        if not has_storage:
+            return {
+                "success": False,
+                "error": f"No credentials found for profile '{profile}' at {target_dir}",
+                "hint": f"Authenticate first by running:\n  NOTEBOOKLM_HOME={target_dir} notebooklm login",
+            }
 
-    previous = app.profile
-
-    await ctx.info(f"Switching from '{previous}' to '{profile}'...")
-    if app.client is not None:
-        with suppress(Exception):
-            await app.client.__aexit__(None, None, None)
-
-    app.client = await _create_client(profile)
-    app.profile = profile
-
-    _write_active_profile(profile)
+        previous = app.profile
+        await ctx.info(f"Switching from '{previous}' to '{profile}'...")
+        try:
+            async with app.suspend_for_switch():
+                with _sdk_home(target_dir, target_sdk_profile):
+                    client = await _create_client(profile)
+                    try:
+                        _write_active_profile(profile)
+                    except Exception:
+                        await client.__aexit__(*sys.exc_info())
+                        raise
+        except Exception as exc:
+            return {"success": False, "error": f"Could not switch to profile '{profile}' ({type(exc).__name__})."}
+        app.client = client
+        app.profile = profile
+        app.sdk_profile = target_sdk_profile
+        app.inline_auth = False
 
     await ctx.info(f"Switched to '{profile}' account")
 
@@ -828,16 +991,20 @@ async def create_profile(
         Dictionary with the profile status and next steps.
     """
     target_dir = _resolve_profile_dir(profile)
-    storage_file = target_dir / "storage_state.json"
 
-    if storage_file.exists():
-        return {
-            "success": False,
-            "error": f"Profile '{profile}' already exists at {target_dir}",
-            "hint": "Use switch_account to switch to it, or choose a different name.",
-        }
+    async with _SDK_LOCK:
+        try:
+            has_storage = _storage_path(target_dir).is_file()
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {"success": False, "error": f"Cannot resolve storage for profile '{profile}': {exc}"}
+        if has_storage:
+            return {
+                "success": False,
+                "error": f"Profile '{profile}' already exists at {target_dir}",
+                "hint": "Use switch_account to switch to it, or choose a different name.",
+            }
 
-    success = await _run_login(profile, ctx)
+        success = await _run_login(profile, ctx)
 
     if not success:
         return {

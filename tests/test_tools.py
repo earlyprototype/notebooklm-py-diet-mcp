@@ -5,6 +5,10 @@ expected arguments and returns a well-structured result dict.
 """
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from notebooklm_mcp_server import (
     add_sources,
@@ -197,9 +201,11 @@ class TestListArtifacts:
 
 
 class TestExportArtifact:
-    async def test_exports_artifact(self, mock_ctx, mock_client):
-        result = await export_artifact("nb-1", "art-1", "/tmp/out.pdf", ctx=mock_ctx)
+    async def test_exports_artifact(self, mock_ctx, mock_client, tmp_path):
+        output = tmp_path / "out.pdf"
+        result = await export_artifact("nb-1", "art-1", str(output), ctx=mock_ctx)
         assert result["success"] is True
+        assert output.read_bytes() == b"exported-data"
         mock_client.artifacts.export.assert_awaited_once()
 
 
@@ -209,12 +215,118 @@ class TestExportArtifact:
 
 
 class TestResearchAndImport:
+    @pytest.fixture(autouse=True)
+    def skip_poll_delay(self, monkeypatch):
+        monkeypatch.setattr("notebooklm_mcp_server.asyncio.sleep", AsyncMock())
+
     async def test_researches_and_imports(self, mock_ctx, mock_client):
         result = await research_and_import("nb-1", "quantum computing", ctx=mock_ctx)
         assert result["success"] is True
         assert result["query"] == "quantum computing"
         mock_client.research.start.assert_awaited_once()
+        mock_client.research.poll.assert_awaited_once_with("nb-1", task_id="research-1")
         mock_client.research.import_sources.assert_awaited_once()
+
+    async def test_times_out_without_importing_partial_results(self, mock_ctx, mock_client):
+        mock_client.research.poll.return_value = SimpleNamespace(
+            task_id="research-1", status="in_progress", results=["partial"]
+        )
+
+        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
+
+        assert "timed out" in result["error"].lower()
+        assert "outcome is unknown" in result["error"].lower()
+        assert not result.get("success")
+        assert mock_client.research.poll.await_count == 60
+        mock_client.research.import_sources.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("response", "reason"),
+        [
+            ({"status": "error", "error": "Quota exceeded", "results": ["partial"]}, "Quota exceeded"),
+            (SimpleNamespace(task_id="research-1", status="failed", sources=["partial"]), "failed"),
+            ({"sources": ["partial"]}, "status"),
+        ],
+    )
+    async def test_stops_on_poll_failure(self, mock_ctx, mock_client, response, reason):
+        mock_client.research.poll.return_value = response
+
+        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
+
+        assert reason in result["error"]
+        assert not result.get("success")
+        mock_client.research.poll.assert_awaited_once()
+        mock_client.research.import_sources.assert_not_awaited()
+
+    async def test_imports_matching_sdk_sources_on_last_poll(self, mock_ctx, mock_client):
+        sources = [{"url": "https://example.com/a", "title": "A"}, {"url": "https://example.com/b", "title": "B"}]
+        mock_client.research.start.return_value = {"task_id": "research-1"}
+        mock_client.research.poll.side_effect = [
+            {"task_id": "other", "status": "completed", "sources": []},
+            *[{"task_id": "research-1", "status": "in_progress"}] * 58,
+            {"task_id": "research-1", "status": "completed", "sources": sources},
+        ]
+
+        result = await research_and_import("nb-1", "test", max_results=1, ctx=mock_ctx)
+
+        assert result["success"] is True
+        assert result["results_found"] == 2
+        assert result["imported"] == 1
+        mock_client.research.import_sources.assert_awaited_once_with("nb-1", task_id="research-1", sources=sources[:1])
+
+    async def test_ignores_completion_without_task_id(self, mock_ctx, mock_client):
+        mock_client.research.poll.return_value = {"status": "completed", "sources": [{"url": "https://example.com"}]}
+
+        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
+
+        assert "timed out" in result["error"].lower()
+        mock_client.research.import_sources.assert_not_awaited()
+
+    async def test_completed_task_with_no_sources(self, mock_ctx, mock_client):
+        mock_client.research.poll.return_value = {"task_id": "research-1", "status": "completed", "sources": []}
+
+        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
+
+        assert result["success"] is True
+        assert result["results_found"] == result["imported"] == 0
+        mock_client.research.import_sources.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("sources", "confirmed"),
+        [
+            pytest.param([{"url": "", "title": "Skipped"}], [], id="skipped"),
+            pytest.param(
+                [{"url": "https://example.com/a", "title": "A"}, {"url": "https://example.com/b", "title": "B"}],
+                [{"id": "src-a", "title": "A"}],
+                id="partly-confirmed",
+            ),
+        ],
+    )
+    async def test_reports_incomplete_import(self, mock_ctx, mock_client, sources, confirmed):
+        mock_client.research.poll.return_value = {"task_id": "research-1", "status": "completed", "sources": sources}
+        mock_client.research.import_sources.return_value = confirmed
+
+        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
+
+        assert result["imported"] == len(confirmed)
+        assert result["results_found"] == len(sources)
+        assert result["success"] is False
+        assert "confirm" in result["error"].lower()
+        assert result["import_details"] == confirmed
+
+    async def test_imports_typed_sources(self, mock_ctx, mock_client):
+        source = SimpleNamespace(url="https://example.com", title="Example")
+
+        async def poll(notebook_id, task_id):
+            assert (notebook_id, task_id) == ("nb-1", "research-1")
+            return SimpleNamespace(task_id=task_id, status="completed", sources=(source,))
+
+        mock_client.research.poll = poll
+
+        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
+
+        assert result["success"] is True
+        mock_client.research.import_sources.assert_awaited_once_with("nb-1", task_id="research-1", sources=(source,))
 
     async def test_returns_error_on_auth_failure(self, mock_ctx, app_context):
         app_context.client = None
