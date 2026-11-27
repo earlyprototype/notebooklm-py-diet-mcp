@@ -138,13 +138,14 @@ class AppContext:
             yield
             return
         with _sdk_home(_resolve_profile_dir(self.profile), self.sdk_profile):
-            with CancelScope(shield=True):
-                await self.client.__aexit__(None, None, None)
             try:
+                with CancelScope(shield=True):
+                    await self.client.__aexit__(None, None, None)
                 yield
             except BaseException:
-                with CancelScope(shield=True):
-                    await self.client.__aenter__()
+                if not self.client.is_connected:
+                    with CancelScope(shield=True):
+                        await self.client.__aenter__()
                 raise
 
     @asynccontextmanager
@@ -291,8 +292,11 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     async with _SDK_LOCK:
         profile = _current_profile_name()
         ctx = AppContext(client=None, profile=profile, inline_auth="NOTEBOOKLM_AUTH_JSON" in os.environ)
+        if ctx.inline_auth:
+            # Inline sessions have no storage file. Bind their SDK calls without reading config.json.
+            ctx.sdk_profile = os.environ.get("NOTEBOOKLM_PROFILE") or "default"
         # Keep account management available when the SDK rejects the active profile.
-        with suppress(Exception), _sdk_home(_resolve_profile_dir(profile)) as sdk_profile:
+        with suppress(Exception), _sdk_home(_resolve_profile_dir(profile), ctx.sdk_profile) as sdk_profile:
             if ctx.inline_auth:
                 ctx.client = await _create_client(profile, inline_auth=True)
             elif get_storage_path().is_file():
@@ -303,10 +307,10 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         yield ctx
     finally:
         with CancelScope(shield=True):
-            async with ctx.sdk_session() as client:
-                if client is not None:
-                    with suppress(Exception):
-                        await client.__aexit__(None, None, None)
+            async with _SDK_LOCK:
+                if ctx.client is not None:
+                    with _sdk_home(_resolve_profile_dir(ctx.profile), ctx.sdk_profile), suppress(Exception):
+                        await ctx.client.__aexit__(None, None, None)
                     ctx.client = None
 
 

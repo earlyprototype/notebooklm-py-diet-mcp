@@ -63,7 +63,7 @@ notebooklm list
 
 Use a separate `NOTEBOOKLM_HOME` for each account, such as `~/.notebooklm` for personal and `~/.notebooklm-design` for design. SDK 0.8.6 stores a fresh default session at `profiles/default/storage_state.json` inside that directory. The SDK also recognizes the older `storage_state.json` at the account root.
 
-If `NOTEBOOKLM_AUTH_JSON` is set, the server uses it at startup, even when the account directory contains a saved session. Use `switch_account` to select a file-backed session at runtime. Unset `NOTEBOOKLM_AUTH_JSON` before restarting to keep using that saved account. `get_account_info` reports the authentication source and lists accounts with usable storage paths. If the active SDK profile is invalid, you can still use these tools to select another account.
+At startup, `NOTEBOOKLM_AUTH_JSON` takes precedence over a saved session and works even if the SDK cannot read the account's `config.json`. Use `switch_account` to select a file-backed session at runtime. Unset `NOTEBOOKLM_AUTH_JSON` before restarting to keep using that saved account. `get_account_info` reports the authentication source and lists accounts with usable storage paths. If the active SDK profile is invalid, you can still use these tools to select another account.
 
 Each HTTP session keeps its own account selection. SDK-backed requests take turns because SDK 0.8.6 reads the process environment during refresh. Research releases the SDK between polls. If you switch accounts in that interval, the research call reports an interruption and skips import.
 

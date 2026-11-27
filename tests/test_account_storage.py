@@ -61,6 +61,29 @@ async def test_startup_prefers_inline_identity_to_legacy_file(tmp_path, monkeypa
         assert (await server.get_account_info(mock_ctx))["auth_source"] == "storage_state.json"
 
 
+@pytest.fixture
+def utf16_config(tmp_path):
+    home = tmp_path / ".notebooklm"
+    home.mkdir()
+    (home / "config.json").write_text('{"default_profile": "work"}', encoding="utf-16")
+
+
+async def test_inline_auth_with_utf16_config(utf16_config, monkeypatch, offline_token_fetch):
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", dummy_state("dummy-inline"))
+
+    async with server.app_lifespan(server.mcp) as app:
+        client = app.client
+        assert client is not None and client.is_connected
+        assert client.auth.flat_cookies["SID"] == "dummy-inline"
+        assert client.auth.storage_path is None
+    assert not client.is_connected
+
+
+async def test_empty_lifespan_with_utf16_config(utf16_config):
+    async with server.app_lifespan(server.mcp) as app:
+        assert app.client is None
+
+
 async def test_failed_switch_restores_previous_client_and_home(tmp_path, mock_ctx, offline_token_fetch):
     for dirname in (".notebooklm", ".notebooklm-work"):
         home = tmp_path / dirname
@@ -86,6 +109,35 @@ def account_homes(tmp_path):
         state.parent.mkdir(parents=True)
         state.write_text(dummy_state(account), encoding="utf-8")
         (home / "config.json").write_text(json.dumps({"default_profile": sdk_profile}), encoding="utf-8")
+
+
+def empty_notebook_response(request):
+    payload = json.dumps([["wrb.fr", request.url.params["rpcids"], "[[]]"]])
+    return httpx.Response(200, text=")]}'\n\n" + f"{len(payload)}\n{payload}\n")
+
+
+async def test_switch_recovers_from_transport_close_failure(account_homes, mock_ctx, monkeypatch, offline_token_fetch):
+    async def reply(_transport, request):
+        assert "SID=.notebooklm" in request.headers["Cookie"].split("; ")
+        return empty_notebook_response(request)
+
+    close = httpx.AsyncHTTPTransport.aclose
+
+    async def fail_close(transport):
+        await close(transport)
+        raise OSError("dummy transport close failure")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reply)
+    async with server.app_lifespan(server.mcp) as app:
+        mock_ctx.request_context.lifespan_context = app
+        previous = app.client
+        with monkeypatch.context() as patch:
+            patch.setattr(httpx.AsyncHTTPTransport, "aclose", fail_close)
+            result = await server.switch_account("work", mock_ctx)
+        assert result["success"] is False
+        assert app.client is previous and previous.is_connected
+        assert server._current_profile_name() == app.profile == "personal"
+        assert await server.list_notebooks(mock_ctx) == "No notebooks found."
 
 
 @pytest.fixture
@@ -117,8 +169,7 @@ def expired_notebooks_rpc(monkeypatch):
             if expired_rpc:
                 expired_rpc = False
                 return httpx.Response(401)
-            payload = json.dumps([["wrb.fr", request.url.params["rpcids"], "[[]]"]])
-            return httpx.Response(200, text=")]}'\n\n" + f"{len(payload)}\n{payload}\n")
+            return empty_notebook_response(request)
         if request.url.host == "accounts.google.com":
             return httpx.Response(200)
         if expired_home:
@@ -229,14 +280,16 @@ def opened_storage(monkeypatch, mock_client):
     return opened
 
 
-async def test_startup_uses_configured_home(tmp_path, monkeypatch, layout, opened_storage, mock_client):
+async def test_startup_uses_configured_home(tmp_path, monkeypatch, layout, offline_token_fetch):
     home = tmp_path / "custom-home"
     monkeypatch.setenv("NOTEBOOKLM_HOME", str(home))
-    write_state(home / layout)
+    state = home / layout
+    state.parent.mkdir(parents=True)
+    state.write_text(dummy_state("dummy-file"), encoding="utf-8")
 
     async with server.app_lifespan(server.mcp) as app:
-        assert app.client is mock_client
-        assert opened_storage == [home / layout]
+        assert app.client.auth.storage_path == state
+        assert app.client.auth.flat_cookies["SID"] == "dummy-file"
 
 
 async def test_discover_and_switch_existing_account(tmp_path, layout, opened_storage, mock_ctx):
