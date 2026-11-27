@@ -6,16 +6,19 @@ expected arguments and returns a well-structured result dict.
 
 import asyncio
 import json
+import logging
+import os
 import wave
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import av
 import fitz
 import httpx
 import pytest
+from mcp.server.fastmcp.utilities.logging import configure_logging
 from notebooklm import ArtifactType, AudioFormat, AudioLength, GenerationStatus, QuizDifficulty, QuizQuantity
 
 from notebooklm_mcp_server import (
@@ -28,7 +31,9 @@ from notebooklm_mcp_server import (
     list_artifacts,
     list_notebooks_tool,
     list_sources,
+    mcp,
     research_and_import,
+    switch_account,
 )
 
 # ============================================================================
@@ -156,13 +161,19 @@ class TestAskQuestion:
 
 
 class TestGenerateAndDownload:
-    async def test_generates_and_downloads_report(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "report", "/tmp/out.md", ctx=mock_ctx)
+    async def test_generates_and_downloads_report(self, mock_ctx, mock_client, tmp_path):
+        def write_report(notebook_id, output_path, artifact_id):
+            Path(output_path).write_text(f"# {artifact_id}", encoding="utf-8")
+
+        output = tmp_path / "report.md"
+        mock_client.artifacts.download_report.side_effect = write_report
+        result = await generate_and_download("nb-1", "report", str(output), ctx=mock_ctx)
         assert result["success"] is True
         assert result["artifact_type"] == "report"
         mock_client.artifacts.generate_report.assert_awaited_once()
         mock_client.artifacts.wait_for_completion.assert_awaited_once()
-        mock_client.artifacts.download_report.assert_awaited_once_with("nb-1", "/tmp/out.md", artifact_id="task-report")
+        mock_client.artifacts.download_report.assert_awaited_once_with("nb-1", ANY, artifact_id="task-report")
+        assert output.read_text(encoding="utf-8") == "# task-report"
 
     async def test_generates_and_downloads_audio(self, mock_ctx, mock_client, tmp_path):
         def download_wave(notebook_id, output_path, artifact_id):
@@ -196,15 +207,21 @@ class TestGenerateAndDownload:
         assert result["success"] is True
         mock_client.artifacts.generate_slide_deck.assert_awaited_once()
 
-    async def test_generates_and_downloads_quiz(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "quiz", "/tmp/out.json", ctx=mock_ctx)
+    async def test_generates_and_downloads_quiz(self, mock_ctx, mock_client, tmp_path):
+        def write_quiz(notebook_id, output_path, artifact_id, output_format):
+            Path(output_path).write_text(json.dumps({"title": artifact_id, "questions": []}), encoding="utf-8")
+
+        mock_client.artifacts.download_quiz.side_effect = write_quiz
+        output = tmp_path / "quiz.json"
+        result = await generate_and_download("nb-1", "quiz", str(output), ctx=mock_ctx)
         assert result["success"] is True
         mock_client.artifacts.generate_quiz.assert_awaited_once_with(
             "nb-1", quantity=QuizQuantity.STANDARD, difficulty=QuizDifficulty.MEDIUM
         )
         mock_client.artifacts.download_quiz.assert_awaited_once_with(
-            "nb-1", "/tmp/out.json", artifact_id="task-quiz", output_format="json"
+            "nb-1", ANY, artifact_id="task-quiz", output_format="json"
         )
+        assert json.loads(output.read_text(encoding="utf-8"))["title"] == "task-quiz"
 
     async def test_generates_and_downloads_infographic(self, mock_ctx, mock_client, tmp_path):
         def download_png(notebook_id, output_path, artifact_id):
@@ -317,13 +334,31 @@ class TestExportArtifact:
         assert not output.exists()
 
     async def test_quiz_markdown_export(self, mock_ctx, mock_client, tmp_path):
-        output = str(tmp_path / "review.md")
+        def write_quiz(notebook_id, output_path, artifact_id, output_format):
+            Path(output_path).write_text(f"# {artifact_id}", encoding="utf-8")
+
+        output = tmp_path / "review.md"
         mock_client.artifacts.get.return_value = SimpleNamespace(id="quiz-id", kind=ArtifactType.QUIZ)
-        result = await export_artifact("nb-1", "quiz-id", output, ctx=mock_ctx)
+        mock_client.artifacts.download_quiz.side_effect = write_quiz
+        result = await export_artifact("nb-1", "quiz-id", str(output), ctx=mock_ctx)
         assert result["success"]
         mock_client.artifacts.download_quiz.assert_awaited_once_with(
-            "nb-1", output, artifact_id="quiz-id", output_format="markdown"
+            "nb-1", ANY, artifact_id="quiz-id", output_format="markdown"
         )
+        assert output.read_text(encoding="utf-8") == "# quiz-id"
+
+    async def test_text_export_encoding_failure_preserves_file(self, mock_ctx, mock_client, tmp_path):
+        def write_report(notebook_id, output_path, artifact_id):
+            Path(output_path).write_text("Invalid surrogate: \ud800", encoding="utf-8")
+
+        mock_client.artifacts.get.return_value = SimpleNamespace(id="report", kind=ArtifactType.REPORT)
+        mock_client.artifacts.download_report.side_effect = write_report
+        output = tmp_path / "report.md"
+        output.write_bytes(b"# Original report\n")
+        result = await export_artifact("nb-1", "report", str(output), ctx=mock_ctx)
+        assert "UnicodeEncodeError" in result["error"]
+        assert output.read_bytes() == b"# Original report\n"
+        assert list(tmp_path.iterdir()) == [output]
 
 
 def encoded_media(container_format, codec):
@@ -393,22 +428,32 @@ async def test_binary_export_validates_before_replace(mock_ctx, mock_client, tmp
 
 
 @pytest.mark.parametrize("operation", ["generate_and_download", "export_artifact"])
-async def test_artifact_http_failure_preserves_file_and_omits_url(mock_ctx, mock_client, tmp_path, operation):
-    def failed_download(notebook_id, output_path, artifact_id):
+async def test_artifact_http_failure_preserves_file_and_omits_url(
+    mock_ctx, mock_client, tmp_path, operation, capsys, caplog
+):
+    async def failed_download(notebook_id, output_path, artifact_id):
         Path(output_path).write_bytes(b"partial")
-        request = httpx.Request("GET", "https://example.invalid/download?signature=synthetic-marker")
-        httpx.Response(403, request=request).raise_for_status()
+        transport = httpx.MockTransport(lambda request: httpx.Response(403))
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get("https://example.invalid/download?signature=synthetic-marker")
+            response.raise_for_status()
 
     mock_client.artifacts.download_slide_deck.side_effect = failed_download
     output = tmp_path / "slides.pdf"
     output.write_bytes(b"existing")
-    if operation == "generate_and_download":
-        expected_id = "task-slide_deck"
-        result = await generate_and_download("nb-1", "slide_deck", str(output), ctx=mock_ctx)
-    else:
-        expected_id = "older"
-        mock_client.artifacts.get.return_value = SimpleNamespace(id=expected_id, kind=ArtifactType.SLIDE_DECK)
-        result = await export_artifact("nb-1", expected_id, str(output), ctx=mock_ctx)
+    # Apply FastMCP's normal stderr configuration without pytest's root handlers.
+    with caplog.at_level(mcp.settings.log_level), patch.object(logging.getLogger(), "handlers", []):
+        configure_logging(mcp.settings.log_level)
+        if operation == "generate_and_download":
+            expected_id = "task-slide_deck"
+            result = await generate_and_download("nb-1", "slide_deck", str(output), ctx=mock_ctx)
+        else:
+            expected_id = "older"
+            mock_client.artifacts.get.return_value = SimpleNamespace(id=expected_id, kind=ArtifactType.SLIDE_DECK)
+            result = await export_artifact("nb-1", expected_id, str(output), ctx=mock_ctx)
+    stderr = capsys.readouterr().err
+    assert "synthetic-marker" not in stderr
+    assert "example.invalid" not in stderr
     assert "synthetic-marker" not in json.dumps(result)
     assert "example.invalid" not in json.dumps(result)
     assert result["artifact_id"] == expected_id
@@ -480,6 +525,49 @@ class TestResearchAndImport:
         assert "profile" in result["error"].lower()
         assert result["imported"] == 0
 
+    async def test_profile_switch_during_authentication_aborts_start(self, mock_ctx, mock_client, app_context):
+        other_client = AsyncMock()
+
+        async def switch_during_check():
+            app_context.profile = "other"
+            app_context.client = other_client
+            return []
+
+        mock_client.notebooks.list.side_effect = switch_during_check
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        for client in (mock_client, other_client):
+            client.research.start.assert_not_awaited()
+            client.research.import_sources.assert_not_awaited()
+        assert "profile" in result["error"].lower()
+        assert result["imported"] == 0
+
+    async def test_profile_switch_during_login_keeps_new_account(self, mock_ctx, mock_client, app_context, monkeypatch):
+        app_context.client = None
+        other_client = AsyncMock()
+
+        async def finish_login(profile):
+            app_context.profile = "other"
+            app_context.client = other_client
+            return mock_client
+
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=True))
+        monkeypatch.setattr("notebooklm_mcp_server._create_client", finish_login)
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert "error" in result
+        assert app_context.client is other_client
+        mock_client.__aexit__.assert_awaited_once()
+        for client in (mock_client, other_client):
+            client.research.start.assert_not_awaited()
+            client.research.import_sources.assert_not_awaited()
+
+    async def test_login_for_intended_profile_can_start_research(self, mock_ctx, mock_client, app_context, monkeypatch):
+        app_context.client = None
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=True))
+        monkeypatch.setattr("notebooklm_mcp_server._create_client", AsyncMock(return_value=mock_client))
+        result = await research_and_import("nb-1", "topic", max_results=1, ctx=mock_ctx)
+        assert result["imported"] == 1
+        mock_client.research.start.assert_awaited_once()
+
     async def test_partial_acknowledgement(self, mock_ctx, mock_client):
         result = await research_and_import("nb-1", "topic", max_results=2, ctx=mock_ctx)
         mock_client.research.import_sources.assert_awaited_once_with(
@@ -540,6 +628,43 @@ class TestGetAccountInfo:
         result = await get_account_info(mock_ctx)
         assert result["current_account"] == "test"
         assert "available_profiles" in result
+
+
+@pytest.mark.parametrize("failure", ["create", "persist", None])
+async def test_account_switch_transaction(failure, mock_ctx, mock_client, app_context, monkeypatch, tmp_path):
+    previous_home = str(tmp_path / ".notebooklm-test")
+    monkeypatch.setenv("NOTEBOOKLM_HOME", previous_home)
+    active = tmp_path / "active.json"
+    active.write_text('{"active": "test"}', encoding="utf-8")
+    monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", active)
+    target = tmp_path / ".notebooklm-work"
+    target.mkdir()
+    (target / "storage_state.json").touch()
+    candidate = AsyncMock()
+    factory = AsyncMock(return_value=candidate)
+    monkeypatch.setattr("notebooklm_mcp_server.NotebookLMClient.from_storage", factory)
+    if failure == "create":
+        factory.side_effect = ValueError("Synthetic client failure")
+    elif failure == "persist":
+        monkeypatch.setattr("notebooklm_mcp_server._write_active_profile", Mock(side_effect=OSError("Disk full")))
+
+    if failure:
+        with pytest.raises(ValueError if failure == "create" else OSError):
+            await switch_account("work", mock_ctx)
+        assert os.environ["NOTEBOOKLM_HOME"] == previous_home
+        assert app_context.profile == json.loads(active.read_text(encoding="utf-8"))["active"] == "test"
+        assert app_context.client is mock_client
+        mock_client.__aexit__.assert_not_awaited()
+        if failure == "persist":
+            candidate.__aexit__.assert_awaited_once()
+    else:
+        result = await switch_account("work", mock_ctx)
+        assert result["success"]
+        assert os.environ["NOTEBOOKLM_HOME"] == str(target)
+        assert app_context.profile == json.loads(active.read_text(encoding="utf-8"))["active"] == "work"
+        assert app_context.client is candidate
+        mock_client.__aexit__.assert_awaited_once()
+        factory.assert_awaited_once_with(path=str(target / "storage_state.json"))
 
 
 # ============================================================================

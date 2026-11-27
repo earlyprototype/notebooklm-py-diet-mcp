@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from notebooklm_mcp_server import (
     _current_profile_name,
     _find_cli,
@@ -65,6 +67,22 @@ class TestWriteActiveProfile:
             _write_active_profile("design")
             data = json.loads(path.read_text(encoding="utf-8"))
             assert data["active"] == "design"
+
+    def test_interrupted_write_keeps_saved_profile(self, tmp_path, monkeypatch):
+        path = tmp_path / "active.json"
+        original = b'{"active": "personal"}'
+        path.write_bytes(original)
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", path)
+
+        def partial_write(target, text, encoding):
+            target.write_bytes(b"{")
+            raise OSError("Disk full")
+
+        monkeypatch.setattr(Path, "write_text", partial_write)
+        with pytest.raises(OSError, match="Disk full"):
+            _write_active_profile("work")
+        assert path.read_bytes() == original
+        assert list(tmp_path.iterdir()) == [path]
 
 
 class TestCurrentProfileName:
