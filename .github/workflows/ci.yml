@@ -28,7 +28,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # Editable install pulls all runtime deps from pyproject and verifies packaging on every run
-      - run: pip install -e .
+      - if: matrix.python-version == '3.10'
+        run: pip install -e . 'notebooklm-py==0.3.2'
+      - if: matrix.python-version != '3.10'
+        run: pip install -e .
       - run: pip install pytest pytest-asyncio pytest-cov
       - run: pytest tests/ -v --tb=short --cov=notebooklm_mcp_server --cov-report=term-missing
+
+  install:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        install-path: [wheel, requirements]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: matrix.install-path == 'wheel'
+        run: |
+          python -m pip wheel --no-deps -w dist .
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          python -I "$GITHUB_WORKSPACE/tests/test_install.py" TestInstall.test_slide_styles
+      - if: matrix.install-path == 'requirements'
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest tests.test_install.TestInstall.test_pdf_page_order

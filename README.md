@@ -48,7 +48,7 @@ This server is not just a thin wrapper. It adds capabilities that the underlying
 | URI | Description |
 |-----|-------------|
 | `notebooklm://notebooks` | List all notebooks (read-only) |
-| `notebooklm://notebook/{id}` | Notebook details including sources |
+| `notebooklm://notebook/{notebook_id}` | Notebook details including sources |
 
 ### MCP Prompts
 
@@ -195,7 +195,7 @@ Once configured, you can interact with NotebookLM directly from your AI agent:
 
 **Generate and download content:**
 > "Generate a podcast overview for the Project notebook and save it"
-> "Generate a report from the Strategy notebook and download it as PDF"
+> "Generate a report from the Strategy notebook and save it as Markdown"
 > "Create an infographic from the Training notebook"
 
 **Research and import:**

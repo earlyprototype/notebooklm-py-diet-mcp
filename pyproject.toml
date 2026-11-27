@@ -23,11 +23,13 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    "anyio>=4",
     "notebooklm-py[browser]>=0.3.2",
     # MCP SDK 2.0 removed mcp.server.fastmcp (replaced by mcp.server.mcpserver),
     # which this server is built on. Stay on the 1.x line until it is ported.
     "mcp[cli]>=1.0.0,<2.0.0",
     "pymupdf>=1.24.0",
+    "av>=16.0.1",
 ]
 
 [project.optional-dependencies]
@@ -47,7 +49,7 @@ Repository = "https://github.com/earlyprototype/notebooklm-py-diet-mcp"
 [tool.hatch.build.targets.wheel]
 # Single-module project: the module name doesn't match the project name,
 # so hatchling needs to be told explicitly what ships in the wheel.
-only-include = ["notebooklm_mcp_server.py"]
+only-include = ["notebooklm_mcp_server.py", "templates/slide_styles.md"]
 
 [tool.ruff]
 target-version = "py310"

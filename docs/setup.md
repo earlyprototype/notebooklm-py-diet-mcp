@@ -63,6 +63,8 @@ notebooklm list
 
 You can authenticate multiple accounts by changing `NOTEBOOKLM_HOME` to a different directory for each (e.g. `~/.notebooklm-personal`, `~/.notebooklm-design`).
 
+When `create_profile` or automatic re-authentication opens the browser, SDK 0.3.2 asks you to press Enter after sign-in. Use the separate login console on Windows or the server's controlling terminal on macOS and Linux. If the server runs without a terminal on macOS or Linux, run `notebooklm login` in a terminal with `NOTEBOOKLM_HOME` set to the target profile directory. SDK 0.8.6 detects browser sign-in automatically.
+
 ## Server Configuration
 
 ### Cursor

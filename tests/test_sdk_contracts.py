@@ -10,11 +10,16 @@ swapped positional arguments, and removed/renamed SDK parameters.
 
 import inspect
 
+import pytest
 from notebooklm._artifacts import ArtifactsAPI
 from notebooklm._chat import ChatAPI
 from notebooklm._notebooks import NotebooksAPI
-from notebooklm._research import ResearchAPI
 from notebooklm._sources import SourcesAPI
+
+try:
+    from notebooklm._research import ResearchAPI
+except ImportError:
+    from notebooklm._research import BaseResearchAPI as ResearchAPI
 
 
 def _get_param_names(cls, method_name: str) -> list[str]:
@@ -147,6 +152,23 @@ class TestArtifactGenerationContract:
 
 
 class TestArtifactDownloadContract:
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "audio",
+            "video",
+            "report",
+            "slide_deck",
+            "quiz",
+            "flashcards",
+            "infographic",
+            "data_table",
+            "mind_map",
+        ],
+    )
+    def test_can_download_by_id(self, kind):
+        assert _accepts_kwarg(ArtifactsAPI, f"download_{kind}", "artifact_id")
+
     def test_download_audio_positional_order(self):
         params = _get_positional_params(ArtifactsAPI, "download_audio")
         assert params[0] == "notebook_id"

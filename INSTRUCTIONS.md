@@ -4,6 +4,7 @@ ACCOUNT CONTEXT:
 - Multiple Google accounts are supported via named profiles (e.g. work, personal, design)
 - Use get_account_info to see the active account and all available profiles
 - Use switch_account to change the active profile at runtime -- no restart required
+- Generate and export use the account selected when the tool starts. A switch during session validation aborts the request. A switch during download waits until the file is saved.
 - Use create_profile to set up a new account -- this launches a browser for Google sign-in
 - The active profile is persisted across server restarts in ~/.notebooklm-active.json
 - Workflow for a new account: create_profile -> (user signs in) -> switch_account
@@ -36,11 +37,11 @@ IMPORTANT - generate_and_download tool:
 - Generates an artifact and downloads it in one step
 - Supported artifact types: report, audio, slide_deck, quiz, infographic
 - Correct file extensions for output_path:
-    - report: .pdf
-    - audio: .wav
+    - report: .md (Markdown)
+    - audio: .m4a for MP4 audio, .wav for WAV, or .mp3 for MPEG Layer III. If the error identifies another supported encoding, retry export_artifact with that extension and the generated artifact ID.
     - slide_deck: .pdf
     - quiz: depends on quiz_output_format param (.json, .md, .html)
-    - infographic: .pdf
+    - infographic: .png
 - Audio options: audio_format (deep-dive, brief, critique, debate), audio_length (short, medium, long)
 - Quiz options: quiz_quantity (few, standard, more), quiz_difficulty (easy, medium, hard)
 - Use instructions parameter to customise generation -- for slide decks, pass a design template to control visual style
@@ -49,12 +50,16 @@ IMPORTANT - generate_and_download tool:
 IMPORTANT - list_artifacts and export_artifact:
 - list_artifacts shows previously generated artifacts in a notebook (optionally filtered by type)
 - export_artifact downloads a specific artifact by ID to a file
+- On POSIX systems, generated and exported files are readable and writable only by their owner.
+- With SDK 0.3.2, unset NOTEBOOKLM_AUTH_JSON so media downloads use the selected profile's cookies. The server checks this before starting audio, slide deck, or infographic generation.
+- Use .csv for a data table, .json for a mind map and .mp4 for a video. Flashcards accept the same formats as quizzes.
 - Use these to retrieve content that was generated previously without regenerating it
 
 IMPORTANT - research_and_import tool:
 - Researches a topic and imports the results as notebook sources in a single call
 - Params: query (search terms), source ("web" or "drive"), max_results (default 5)
 - The tool starts the research, polls until complete, and imports the top results automatically
+- A successful call reports how many sources it submitted and how many the SDK acknowledged. If these counts differ, imported is null. Check list_sources before retrying to avoid duplicate imports.
 - This replaces the manual three-step workflow of start -> poll -> import
 
 IMPORTANT - PDF / PNG conversion utilities:
@@ -66,7 +71,7 @@ AUTOMATIC RE-AUTHENTICATION:
 - The server handles expired or missing Google sessions automatically
 - The server starts without validating the session, so it is always available
 - On the first tool call (and every subsequent call), the session is validated. If credentials are missing or expired, the server automatically launches a browser for Google sign-in, waits for the user to complete it, reconnects, and resumes the original operation
-- The user will see a browser window open and a message explaining what is happening -- no manual intervention is required beyond signing in
+- Complete sign-in in the browser. If the SDK prompts for Enter, press it in the login console on Windows or the server's controlling terminal on macOS and Linux.
 - If automatic re-authentication fails (e.g. browser automation unavailable), the server falls back to instructing the user to run notebooklm login manually
 
 ERROR HANDLING:

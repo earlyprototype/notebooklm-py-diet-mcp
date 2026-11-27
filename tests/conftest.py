@@ -3,15 +3,55 @@
 All tests are CI-safe: no Google credentials or network access required.
 """
 
+import asyncio
+import shutil
 import sys
+import venv
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
+from zipfile import is_zipfile
 
+import notebooklm
 import pytest
+from notebooklm import GenerationStatus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+@pytest.fixture(params=["installed", "non_zip"] if sys.platform == "win32" else ["installed"])
+def synthetic_login_sdk(request, tmp_path, monkeypatch):
+    from notebooklm_mcp_server import _find_cli
+
+    cli = _find_cli()
+    assert cli is not None, "the test environment needs the SDK's installed notebooklm launcher"
+    fixture_sdk = Path(__file__).parent / "fixtures" / "login_sdk"
+    if sys.platform == "win32" and (request.param == "non_zip" or not is_zipfile(cli)):
+        # The isolated fallback ignores PYTHONPATH. Install the synthetic CLI
+        # in a disposable venv where the stdio server can still load the SDK.
+        environment = tmp_path / "login-venv"
+        venv.EnvBuilder().create(environment)
+        packages = environment / "Lib" / "site-packages"
+        sdk = Path(notebooklm.__file__).parent
+        shutil.copytree(sdk, packages / "notebooklm", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copyfile(fixture_sdk / "notebooklm" / "notebooklm_cli.py", packages / "notebooklm" / "notebooklm_cli.py")
+        (packages / "test_dependencies.pth").write_text(
+            f"import site; site.addsitedir({str(sdk.parent)!r})\n", encoding="utf-8"
+        )
+        (environment / "Scripts" / "notebooklm.exe").touch()
+        monkeypatch.setattr(sys, "executable", str(environment / "Scripts" / "python.exe"))
+    return str(fixture_sdk)
+
+
+async def wait_for_login_pid(profile):
+    async def read_pid():
+        marker = profile / "login.pid"
+        while not marker.exists():
+            await asyncio.sleep(0.01)
+        return int(marker.read_text(encoding="ascii"))
+
+    return await asyncio.wait_for(read_pid(), timeout=10)
 
 
 @dataclass
@@ -30,11 +70,6 @@ class FakeSource:
 class FakeAnswer:
     answer: str
     citations: list
-
-
-@dataclass
-class FakeTaskStatus:
-    task_id: str
 
 
 @dataclass
@@ -118,18 +153,29 @@ def make_mock_client():
         "quiz",
     ):
         setattr(
-            client.artifacts, f"generate_{artifact}", AsyncMock(return_value=FakeTaskStatus(task_id=f"task-{artifact}"))
+            client.artifacts,
+            f"generate_{artifact}",
+            AsyncMock(return_value=GenerationStatus(f"task-{artifact}", "pending")),
         )
         setattr(client.artifacts, f"download_{artifact}", AsyncMock(return_value=None))
 
-    client.artifacts.wait_for_completion = AsyncMock(return_value=None)
+    client.artifacts.wait_for_completion = AsyncMock(
+        side_effect=lambda nb, task_id: GenerationStatus(task_id, "completed")
+    )
+
+    def download_deck(notebook_id, output_path, artifact_id):
+        import fitz
+
+        with fitz.open() as doc:
+            doc.new_page().insert_text((32, 32), artifact_id)
+            doc.save(output_path)
+        return output_path
+
+    client.artifacts.download_slide_deck.side_effect = download_deck
     client.artifacts.list = AsyncMock(return_value=[])
     client.artifacts.get = AsyncMock(return_value=SimpleNamespace(id="art-1", title="Artifact"))
     client.artifacts.delete = AsyncMock(return_value=None)
     client.artifacts.rename = AsyncMock(return_value=SimpleNamespace(id="art-1", title="Renamed"))
-    client.artifacts.export = AsyncMock(return_value=b"exported-data")
-    client.artifacts.export_report = AsyncMock(return_value=b"report-data")
-    client.artifacts.export_data_table = AsyncMock(return_value=b"table-data")
     client.artifacts.suggest_reports = AsyncMock(
         return_value=[
             SimpleNamespace(
@@ -145,9 +191,19 @@ def make_mock_client():
     )
 
     # ResearchAPI
-    client.research.start = AsyncMock(return_value=SimpleNamespace(task_id="research-1"))
-    client.research.poll = AsyncMock(return_value=SimpleNamespace(status="completed", results=["result1"]))
-    client.research.import_sources = AsyncMock(return_value={"imported": 2})
+    async def legacy_poll(notebook_id):
+        """SDK 0.3.2 polls the notebook's most recent research task."""
+
+    client.research.start = AsyncMock(return_value={"task_id": "research-1", "report_id": None})
+    client.research.poll = create_autospec(
+        legacy_poll,
+        return_value={
+            "status": "completed",
+            "task_id": "research-1",
+            "sources": [{"url": f"https://example.org/{i}", "title": f"Source {i}"} for i in range(3)],
+        },
+    )
+    client.research.import_sources = AsyncMock(return_value=[{"id": "src-0", "title": "Source 0"}])
 
     # NotesAPI
     client.notes.list = AsyncMock(
@@ -195,8 +251,10 @@ def app_context(mock_client):
 
 
 @pytest.fixture
-def mock_ctx(app_context):
+def mock_ctx(app_context, monkeypatch, tmp_path):
     """Provide a mocked MCP Context wired to app_context."""
+    monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=False))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     ctx = MagicMock()
     ctx.request_context.lifespan_context = app_context
     ctx.info = AsyncMock()

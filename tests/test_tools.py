@@ -4,7 +4,26 @@ Each test verifies that the tool calls the correct SDK method with the
 expected arguments and returns a well-structured result dict.
 """
 
+import asyncio
 import json
+import logging
+import os
+import stat
+import wave
+from functools import partial
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import ANY, AsyncMock, Mock, patch
+
+import av
+import fitz
+import httpx
+import pytest
+from mcp.server.fastmcp.utilities.logging import configure_logging
+from notebooklm import ArtifactType, AudioFormat, AudioLength, GenerationStatus, QuizDifficulty, QuizQuantity
+from notebooklm._logging import configure_logging as configure_sdk_logging
+from notebooklm.paths import get_storage_path
 
 from notebooklm_mcp_server import (
     add_sources,
@@ -16,7 +35,9 @@ from notebooklm_mcp_server import (
     list_artifacts,
     list_notebooks_tool,
     list_sources,
+    mcp,
     research_and_import,
+    switch_account,
 )
 
 # ============================================================================
@@ -35,6 +56,51 @@ class TestListNotebooks:
         app_context.client = None
         result = await list_notebooks_tool(mock_ctx)
         assert "error" in result
+
+    @pytest.mark.parametrize("switches", [(), ("work",), ("work", "test")], ids=["refresh", "switch", "switch_back"])
+    async def test_concurrent_login(self, switches, mock_ctx, app_context, mock_client, tmp_path, monkeypatch):
+        app_context.client = None
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def login(profile, ctx):
+            started.set()
+            await finish.wait()
+            return True
+
+        authenticate = AsyncMock(side_effect=login)
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", authenticate)
+        factory = AsyncMock(return_value=mock_client)
+        monkeypatch.setattr("notebooklm_mcp_server._create_client", factory)
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", tmp_path / "active.json")
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path / ".notebooklm-test"))
+
+        calls = [asyncio.create_task(list_notebooks_tool(mock_ctx))]
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            calls.append(asyncio.create_task(list_notebooks_tool(mock_ctx)))
+            await asyncio.sleep(0)  # Let the second call reach the locked profile.
+            assert not calls[1].done()
+            for profile in switches:
+                directory = tmp_path / f".notebooklm-{profile}"
+                directory.mkdir()
+                (directory / "storage_state.json").touch()
+                assert (await switch_account(profile, mock_ctx))["success"]
+        finally:
+            finish.set()
+            results = await asyncio.wait_for(asyncio.gather(*calls), 5)
+
+        first, second = results
+        authenticate.assert_awaited_once_with("test", mock_ctx)
+        if switches:
+            assert "error" in first and "error" in second
+            assert factory.await_count == len(switches)
+            mock_client.notebooks.list.assert_not_awaited()
+        else:
+            assert first["count"] == 2
+            assert second == first
+            factory.assert_awaited_once_with("test")
+            assert mock_client.notebooks.list.await_count == 2
 
 
 class TestCreateNotebook:
@@ -144,40 +210,111 @@ class TestAskQuestion:
 
 
 class TestGenerateAndDownload:
-    async def test_generates_and_downloads_report(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "report", "/tmp/out.pdf", ctx=mock_ctx)
+    async def test_generates_and_downloads_report(self, mock_ctx, mock_client, tmp_path):
+        def write_report(notebook_id, output_path, artifact_id):
+            Path(output_path).write_text(f"# {artifact_id}", encoding="utf-8")
+
+        output = tmp_path / "report.md"
+        mock_client.artifacts.download_report.side_effect = write_report
+        result = await generate_and_download("nb-1", "report", str(output), ctx=mock_ctx)
         assert result["success"] is True
         assert result["artifact_type"] == "report"
         mock_client.artifacts.generate_report.assert_awaited_once()
         mock_client.artifacts.wait_for_completion.assert_awaited_once()
-        mock_client.artifacts.download_report.assert_awaited_once()
+        mock_client.artifacts.download_report.assert_awaited_once_with("nb-1", ANY, artifact_id="task-report")
+        assert output.read_text(encoding="utf-8") == "# task-report"
 
-    async def test_generates_and_downloads_audio(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "audio", "/tmp/out.wav", ctx=mock_ctx)
+    async def test_generates_and_downloads_audio(self, mock_ctx, mock_client, tmp_path):
+        def download_wave(notebook_id, output_path, artifact_id):
+            with wave.open(output_path, "wb") as audio:
+                audio.setparams((1, 1, 8000, 0, "NONE", ""))
+                audio.writeframes(b"\x80" * 80)
+
+        mock_client.artifacts.download_audio.side_effect = download_wave
+        output = tmp_path / "audio.wav"
+        result = await generate_and_download("nb-1", "audio", str(output), ctx=mock_ctx)
         assert result["success"] is True
-        mock_client.artifacts.generate_audio.assert_awaited_once()
-        mock_client.artifacts.download_audio.assert_awaited_once()
+        mock_client.artifacts.generate_audio.assert_awaited_once_with(
+            "nb-1", audio_format=AudioFormat.DEEP_DIVE, audio_length=AudioLength.DEFAULT
+        )
+        assert mock_client.artifacts.download_audio.await_args.kwargs["artifact_id"] == "task-audio"
+        with wave.open(str(output)) as audio:
+            assert audio.getnframes() == 80
+        wrong_format = tmp_path / "audio.mp3"
+        mismatch = await generate_and_download("nb-1", "audio", str(wrong_format), ctx=mock_ctx)
+        assert "wav" in mismatch["error"]
+        assert not wrong_format.exists()
 
-    async def test_generates_and_downloads_slide_deck(self, mock_ctx, mock_client):
+    async def test_generates_and_downloads_slide_deck(self, mock_ctx, mock_client, tmp_path):
         result = await generate_and_download(
             "nb-1",
             "slide_deck",
-            "/tmp/out.pdf",
+            str(tmp_path / "slides.pdf"),
             instructions="Corporate style",
             ctx=mock_ctx,
         )
         assert result["success"] is True
         mock_client.artifacts.generate_slide_deck.assert_awaited_once()
 
-    async def test_generates_and_downloads_quiz(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "quiz", "/tmp/out.json", ctx=mock_ctx)
-        assert result["success"] is True
-        mock_client.artifacts.generate_quiz.assert_awaited_once()
+    async def test_generates_and_downloads_quiz(self, mock_ctx, mock_client, tmp_path):
+        def write_quiz(notebook_id, output_path, artifact_id, output_format):
+            Path(output_path).write_text(json.dumps({"title": artifact_id, "questions": []}), encoding="utf-8")
 
-    async def test_generates_and_downloads_infographic(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "infographic", "/tmp/out.pdf", ctx=mock_ctx)
+        mock_client.artifacts.download_quiz.side_effect = write_quiz
+        output = tmp_path / "quiz.json"
+        result = await generate_and_download("nb-1", "quiz", str(output), ctx=mock_ctx)
+        assert result["success"] is True
+        mock_client.artifacts.generate_quiz.assert_awaited_once_with(
+            "nb-1", quantity=QuizQuantity.STANDARD, difficulty=QuizDifficulty.MEDIUM
+        )
+        mock_client.artifacts.download_quiz.assert_awaited_once_with(
+            "nb-1", ANY, artifact_id="task-quiz", output_format="json"
+        )
+        assert json.loads(output.read_text(encoding="utf-8"))["title"] == "task-quiz"
+
+    async def test_generates_and_downloads_infographic(self, mock_ctx, mock_client, tmp_path):
+        def download_png(notebook_id, output_path, artifact_id):
+            pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), 0)
+            pixmap.clear_with(255)
+            pixmap.save(output_path)
+            return output_path
+
+        mock_client.artifacts.download_infographic.side_effect = download_png
+        output = tmp_path / "out.png"
+        result = await generate_and_download("nb-1", "infographic", str(output), ctx=mock_ctx)
         assert result["success"] is True
         mock_client.artifacts.generate_infographic.assert_awaited_once()
+        assert mock_client.artifacts.download_infographic.await_args.kwargs["artifact_id"] == "task-infographic"
+        assert fitz.Pixmap(str(output)).width == 4
+
+    async def test_failed_generation_does_not_download(self, mock_ctx, mock_client):
+        mock_client.artifacts.wait_for_completion.side_effect = None
+        mock_client.artifacts.wait_for_completion.return_value = GenerationStatus(
+            "task-report", "failed", error="quota"
+        )
+        result = await generate_and_download("nb-1", "report", "output.md", ctx=mock_ctx)
+        assert "quota" in result["error"]
+        mock_client.artifacts.download_report.assert_not_awaited()
+
+    async def test_failed_generation_keeps_sdk_status_details_private(self, mock_ctx, mock_client):
+        mock_client.artifacts.generate_report.return_value = GenerationStatus(
+            "task-report", "failed", error="download?signature=synthetic-marker"
+        )
+        result = await generate_and_download("nb-1", "report", "output.md", ctx=mock_ctx)
+        assert result["artifact_id"] == "task-report"
+        assert "generate_and_download" in result["error"]
+        assert "synthetic-marker" not in json.dumps(result)
+
+    async def test_invalid_quiz_format_does_not_start_generation(self, mock_ctx, mock_client):
+        result = await generate_and_download("nb-1", "quiz", "out.pdf", quiz_output_format="pdf", ctx=mock_ctx)
+        assert "format" in result["error"].lower()
+        mock_client.artifacts.generate_quiz.assert_not_awaited()
+
+    async def test_unknown_audio_format(self, mock_ctx, mock_client):
+        result = await generate_and_download("nb-1", "audio", "out.m4a", audio_format="lecture", ctx=mock_ctx)
+        assert "audio" in result["error"].lower()
+        assert "lecture" in result["error"].lower()
+        mock_client.artifacts.generate_audio.assert_not_awaited()
 
     async def test_rejects_invalid_artifact_type(self, mock_ctx, mock_client):
         result = await generate_and_download("nb-1", "podcast", "/tmp/out.mp3", ctx=mock_ctx)
@@ -197,10 +334,277 @@ class TestListArtifacts:
 
 
 class TestExportArtifact:
-    async def test_exports_artifact(self, mock_ctx, mock_client):
-        result = await export_artifact("nb-1", "art-1", "/tmp/out.pdf", ctx=mock_ctx)
-        assert result["success"] is True
-        mock_client.artifacts.export.assert_awaited_once()
+    async def test_downloads_selected_pdf(self, mock_ctx, mock_client, tmp_path):
+        decks = {
+            "earlier": SimpleNamespace(id="earlier", kind=ArtifactType.SLIDE_DECK),
+            "task-slide_deck": SimpleNamespace(id="task-slide_deck", kind=ArtifactType.SLIDE_DECK),
+        }
+
+        def download(notebook_id, output_path, artifact_id=None):
+            deck = decks[artifact_id or "earlier"]
+            with fitz.open() as doc:
+                doc.new_page().insert_text((32, 32), deck.id)
+                doc.save(output_path)
+            return output_path
+
+        artifacts = mock_client.artifacts
+        artifacts.get.side_effect = lambda notebook_id, artifact_id: decks.get(artifact_id)
+        artifacts.download_slide_deck.side_effect = download
+        generated = tmp_path / "generated.pdf"
+        exported = tmp_path / "exported.pdf"
+        gen_result = await generate_and_download("nb-1", "slide_deck", str(generated), ctx=mock_ctx)
+        assert gen_result["success"], gen_result
+        export_result = await export_artifact("nb-1", "earlier", str(exported), export_format="pdf", ctx=mock_ctx)
+        assert export_result["success"], export_result
+        assert [call.kwargs["artifact_id"] for call in artifacts.download_slide_deck.await_args_list] == [
+            "task-slide_deck",
+            "earlier",
+        ]
+        for path, expected in [(generated, "task-slide_deck"), (exported, "earlier")]:
+            with fitz.open(path) as doc:
+                assert doc.is_pdf
+                assert doc[0].get_text().strip() == expected
+        artifacts.export.assert_not_awaited()
+
+    @pytest.mark.parametrize(("kind", "path", "fmt"), [("slide_deck", "out.pdf", "csv"), ("report", "out.pdf", "")])
+    async def test_unsupported_format_preserves_file(self, mock_ctx, mock_client, tmp_path, kind, path, fmt):
+        mock_client.artifacts.get.return_value = SimpleNamespace(id="item", kind=ArtifactType(kind))
+        output = tmp_path / path
+        output.write_text("existing", encoding="utf-8")
+        result = await export_artifact("nb-1", "item", str(output), fmt, ctx=mock_ctx)
+        assert "format" in result["error"].lower()
+        assert output.read_text(encoding="utf-8") == "existing"
+
+    async def test_missing_artifact(self, mock_ctx, mock_client, tmp_path):
+        mock_client.artifacts.get.return_value = None
+        output = tmp_path / "out.json"
+        result = await export_artifact("nb-1", "absent", str(output), ctx=mock_ctx)
+        assert "absent" in result["error"]
+        assert not output.exists()
+
+    async def test_quiz_markdown_export(self, mock_ctx, mock_client, tmp_path):
+        def write_quiz(notebook_id, output_path, artifact_id, output_format):
+            Path(output_path).write_text(f"# {artifact_id}", encoding="utf-8")
+
+        output = tmp_path / "review.md"
+        mock_client.artifacts.get.return_value = SimpleNamespace(id="quiz-id", kind=ArtifactType.QUIZ)
+        mock_client.artifacts.download_quiz.side_effect = write_quiz
+        result = await export_artifact("nb-1", "quiz-id", str(output), ctx=mock_ctx)
+        assert result["success"]
+        mock_client.artifacts.download_quiz.assert_awaited_once_with(
+            "nb-1", ANY, artifact_id="quiz-id", output_format="markdown"
+        )
+        assert output.read_text(encoding="utf-8") == "# quiz-id"
+
+    async def test_text_export_encoding_failure_preserves_file(self, mock_ctx, mock_client, tmp_path):
+        def write_report(notebook_id, output_path, artifact_id):
+            Path(output_path).write_text("Invalid surrogate: \ud800", encoding="utf-8")
+
+        mock_client.artifacts.get.return_value = SimpleNamespace(id="report", kind=ArtifactType.REPORT)
+        mock_client.artifacts.download_report.side_effect = write_report
+        output = tmp_path / "report.md"
+        output.write_bytes(b"# Original report\n")
+        result = await export_artifact("nb-1", "report", str(output), ctx=mock_ctx)
+        assert "UnicodeEncodeError" in result["error"]
+        assert output.read_bytes() == b"# Original report\n"
+        assert list(tmp_path.iterdir()) == [output]
+
+
+def encoded_media(container_format, codec):
+    buffer = BytesIO()
+    with av.open(buffer, mode="w", format=container_format) as container:
+        if codec == "mpeg4":
+            stream = container.add_stream(codec, rate=25)
+            stream.width = stream.height = 16
+            frame = av.VideoFrame(16, 16, "yuv420p")
+        else:
+            stream = container.add_stream(codec, rate=44100)
+            frame = av.AudioFrame(format="s16", layout="mono", samples=1024)
+            frame.sample_rate = 44100
+        for plane in frame.planes:
+            plane.update(bytes(plane.buffer_size))
+        for _ in range(1 if codec == "mpeg4" else 8):
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode())
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("kind", "fmt", "payload", "valid"),
+    [
+        ("infographic", "png", "jpeg", False),
+        ("infographic", "png", "png", True),
+        ("slide_deck", "pdf", "empty", False),
+        ("slide_deck", "pdf", "truncated_pdf", False),
+        ("audio", "mp3", "adts", False),
+        ("audio", "mp3", "mp3", True),
+        ("audio", "m4a", "m4a", True),
+        ("audio", "m4a", "mp4", False),
+        ("video", "mp4", "m4a", False),
+        ("video", "mp4", "mp4", True),
+    ],
+)
+async def test_binary_export_validates_before_replace(mock_ctx, mock_client, tmp_path, kind, fmt, payload, valid):
+    if payload in ("jpeg", "png"):
+        pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), 0)
+        pixmap.clear_with(255)
+        data = pixmap.tobytes(payload)
+    elif payload in ("empty", "truncated_pdf"):
+        data = b"" if payload == "empty" else b"%PDF-1.7\n"
+    else:
+        container_format, codec = {
+            "mp3": ("mp3", "libmp3lame"),
+            "m4a": ("mp4", "aac"),
+            "mp4": ("mp4", "mpeg4"),
+            "adts": ("adts", "aac"),
+        }[payload]
+        data = encoded_media(container_format, codec)
+    mock_client.artifacts.get.return_value = SimpleNamespace(id="item", kind=ArtifactType(kind))
+    download = getattr(mock_client.artifacts, f"download_{kind}")
+    download.side_effect = lambda nb, path, artifact_id: Path(path).write_bytes(data)
+    output = tmp_path / f"existing.{fmt}"
+    output.write_bytes(b"previous contents")
+    result = await export_artifact("nb-1", "item", str(output), ctx=mock_ctx)
+    if valid:
+        assert result["success"], result
+        assert output.read_bytes() == data
+    else:
+        assert fmt in result["error"].lower()
+        if payload == "adts":
+            assert "AAC" in result["error"]
+        assert output.read_bytes() == b"previous contents"
+    assert list(tmp_path.iterdir()) == [output]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permission bits")
+async def test_replacing_private_report_preserves_mode(mock_ctx, mock_client, tmp_path):
+    output = tmp_path / "report.md"
+    output.write_text("previous", encoding="utf-8")
+    output.chmod(0o600)
+
+    def download(notebook_id, output_path, artifact_id):
+        staged = Path(output_path)
+        staged.write_text("replacement", encoding="utf-8")
+        staged.chmod(0o644)
+
+    mock_client.artifacts.get.return_value = SimpleNamespace(id="selected", kind=ArtifactType.REPORT)
+    mock_client.artifacts.download_report.side_effect = download
+    result = await export_artifact("notebook", "selected", str(output), ctx=mock_ctx)
+    assert result["success"]
+    assert output.read_text(encoding="utf-8") == "replacement"
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+async def test_media_download_uses_profile_credentials_with_inline_auth_set(
+    mock_ctx, mock_client, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path / ".notebooklm-test"))
+    mock_client.artifacts.get.return_value = SimpleNamespace(kind=ArtifactType.SLIDE_DECK)
+    output = tmp_path / "deck.pdf"
+    result = await export_artifact("notebook", "selected", str(output), ctx=mock_ctx)
+    # The legacy downloader gives inline cookies precedence over the profile.
+    if get_storage_path().parent == tmp_path / ".notebooklm-test":
+        assert "NOTEBOOKLM_AUTH_JSON" in result["error"]
+        mock_client.artifacts.download_slide_deck.assert_not_awaited()
+        assert not output.exists()
+    else:
+        assert result["success"]
+        assert output.is_file()
+
+
+@pytest.mark.parametrize(("kind", "extension"), [("audio", "m4a"), ("slide_deck", "pdf"), ("infographic", "png")])
+async def test_legacy_inline_auth_rejected_before_generation(
+    mock_ctx, mock_client, tmp_path, monkeypatch, kind, extension
+):
+    monkeypatch.setattr("notebooklm_mcp_server._PROFILE_AWARE_STORAGE", False)
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
+    output = tmp_path / f"result.{extension}"
+    result = await generate_and_download("notebook", kind, str(output), ctx=mock_ctx)
+    assert "NOTEBOOKLM_AUTH_JSON" in result["error"]
+    getattr(mock_client.artifacts, f"generate_{kind}").assert_not_called()
+    mock_client.artifacts.wait_for_completion.assert_not_called()
+    assert not output.exists()
+
+
+async def test_successful_sdk_download_omits_signed_url(mock_ctx, mock_client, tmp_path, monkeypatch, capsys, caplog):
+    url = "https://fixture.googleusercontent.com/deck?sig=synthetic"
+    with fitz.open() as doc:
+        doc.new_page()
+        pdf = doc.tobytes()
+
+    def serve(request):
+        assert str(request.url) == url
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(serve)))
+    monkeypatch.setenv("NOTEBOOKLM_LOG_LEVEL", "DEBUG")
+    monkeypatch.delenv("NOTEBOOKLM_TRANSPORT", raising=False)
+    try:
+        from notebooklm._artifact.downloads import AssetDownloadService
+    except ImportError:
+        from notebooklm._artifacts import ArtifactsAPI
+
+        monkeypatch.setattr("notebooklm._artifacts.load_httpx_cookies", httpx.Cookies)
+        download = ArtifactsAPI(Mock(), Mock())._download_url
+    else:
+        download = AssetDownloadService(cookie_loader=lambda _: httpx.Cookies()).download_url
+
+    async def download_deck(notebook_id, output_path, artifact_id):
+        return await download(url, output_path)
+
+    mock_client.artifacts.download_slide_deck.side_effect = download_deck
+    output = tmp_path / "slides.pdf"
+    logger = logging.getLogger("notebooklm")
+    with (
+        patch.object(logging.getLogger(), "handlers", []),
+        patch.object(logger, "handlers", []),
+        caplog.at_level(logging.DEBUG, logger=logger.name),
+    ):
+        configure_sdk_logging()
+        assert logger.isEnabledFor(logging.DEBUG)
+        result = await generate_and_download("notebook", "slide_deck", str(output), ctx=mock_ctx)
+    assert result["success"], result
+    assert output.read_bytes() == pdf
+    stderr = capsys.readouterr().err
+    assert "fixture.googleusercontent.com" not in stderr
+    assert "sig=synthetic" not in stderr
+
+
+@pytest.mark.parametrize("operation", ["generate_and_download", "export_artifact"])
+async def test_artifact_http_failure_preserves_file_and_omits_url(
+    mock_ctx, mock_client, tmp_path, operation, capsys, caplog
+):
+    async def failed_download(notebook_id, output_path, artifact_id):
+        Path(output_path).write_bytes(b"partial")
+        transport = httpx.MockTransport(lambda request: httpx.Response(403))
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get("https://example.invalid/download?signature=synthetic-marker")
+            response.raise_for_status()
+
+    mock_client.artifacts.download_slide_deck.side_effect = failed_download
+    output = tmp_path / "slides.pdf"
+    output.write_bytes(b"existing")
+    # Apply FastMCP's normal stderr configuration without pytest's root handlers.
+    with caplog.at_level(mcp.settings.log_level), patch.object(logging.getLogger(), "handlers", []):
+        configure_logging(mcp.settings.log_level)
+        if operation == "generate_and_download":
+            expected_id = "task-slide_deck"
+            result = await generate_and_download("nb-1", "slide_deck", str(output), ctx=mock_ctx)
+        else:
+            expected_id = "older"
+            mock_client.artifacts.get.return_value = SimpleNamespace(id=expected_id, kind=ArtifactType.SLIDE_DECK)
+            result = await export_artifact("nb-1", expected_id, str(output), ctx=mock_ctx)
+    stderr = capsys.readouterr().err
+    assert "synthetic-marker" not in stderr
+    assert "example.invalid" not in stderr
+    assert "synthetic-marker" not in json.dumps(result)
+    assert "example.invalid" not in json.dumps(result)
+    assert result["artifact_id"] == expected_id
+    assert operation in result["error"]
+    assert "403" in result["error"]
+    assert output.read_bytes() == b"existing"
+    assert list(tmp_path.iterdir()) == [output]
 
 
 # ============================================================================
@@ -209,12 +613,188 @@ class TestExportArtifact:
 
 
 class TestResearchAndImport:
+    @pytest.fixture(autouse=True)
+    def skip_poll_delay(self, monkeypatch):
+        monkeypatch.setattr("notebooklm_mcp_server.asyncio.sleep", AsyncMock())
+
     async def test_researches_and_imports(self, mock_ctx, mock_client):
-        result = await research_and_import("nb-1", "quantum computing", ctx=mock_ctx)
+        completed = mock_client.research.poll.return_value
+        mock_client.research.poll.side_effect = [{"task_id": "research-1", "status": "in_progress"}, completed]
+        result = await research_and_import("nb-1", "quantum computing", max_results=1, ctx=mock_ctx)
         assert result["success"] is True
         assert result["query"] == "quantum computing"
         mock_client.research.start.assert_awaited_once()
-        mock_client.research.import_sources.assert_awaited_once()
+        assert result["results_found"] == 3
+        assert result["imported"] == 1
+        mock_client.research.import_sources.assert_awaited_once_with(
+            "nb-1", task_id="research-1", sources=completed["sources"][:1]
+        )
+
+    @pytest.mark.parametrize("started", [None, {}])
+    async def test_no_started_task(self, mock_ctx, mock_client, started):
+        mock_client.research.start.return_value = started
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert "task" in result["error"].lower()
+        assert result["imported"] == 0
+        mock_client.research.poll.assert_not_awaited()
+        mock_client.research.import_sources.assert_not_awaited()
+
+    async def test_typed_task_polls_requested_id(self, mock_ctx, mock_client):
+        source = SimpleNamespace(url="https://example.org/current", title="Current")
+        mock_client.research.start.return_value = SimpleNamespace(task_id="requested")
+
+        async def poll(notebook_id, task_id=None):
+            assert notebook_id == "nb-1"
+            assert task_id == "requested"
+            return SimpleNamespace(task_id=task_id, status="completed", sources=(source,))
+
+        mock_client.research.poll = poll
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert result["success"], result
+        mock_client.research.import_sources.assert_awaited_once_with("nb-1", task_id="requested", sources=(source,))
+
+    async def test_profile_switch_after_poll_aborts_import(self, mock_ctx, mock_client, app_context):
+        other_client = AsyncMock()
+
+        async def switch_before_import(message):
+            if message.startswith("Importing"):
+                app_context.client = other_client
+                app_context.profile = "other"
+
+        mock_ctx.info.side_effect = switch_before_import
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        mock_client.research.poll.assert_awaited_once()
+        mock_client.research.import_sources.assert_not_awaited()
+        other_client.research.import_sources.assert_not_awaited()
+        assert "profile" in result["error"].lower()
+        assert result["imported"] == 0
+
+    async def test_deadline_expires_during_import_notification(self, mock_ctx, mock_client, monkeypatch):
+        loop = asyncio.get_running_loop()
+        clock = loop.time
+        monkeypatch.setattr("notebooklm_mcp_server.RESEARCH_TIMEOUT", 30)
+
+        async def delayed_notification(message):
+            if message.startswith("Importing"):
+                monkeypatch.setattr(loop, "time", lambda: clock() + 31)
+
+        mock_ctx.info.side_effect = delayed_notification
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert result.get("error") == "Research timed out"
+        assert result["imported"] == 0
+        mock_client.research.import_sources.assert_not_called()
+
+    async def test_profile_switch_during_authentication_aborts_start(self, mock_ctx, mock_client, app_context):
+        other_client = AsyncMock()
+
+        async def switch_during_check():
+            app_context.profile = "other"
+            app_context.client = other_client
+            return []
+
+        mock_client.notebooks.list.side_effect = switch_during_check
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        for client in (mock_client, other_client):
+            client.research.start.assert_not_awaited()
+            client.research.import_sources.assert_not_awaited()
+        assert "profile" in result["error"].lower()
+        assert result["imported"] == 0
+
+    async def test_profile_switch_during_login_keeps_new_account(self, mock_ctx, mock_client, app_context, monkeypatch):
+        app_context.client = None
+        other_client = AsyncMock()
+
+        async def finish_login(profile):
+            app_context.profile = "other"
+            app_context.client = other_client
+            return mock_client
+
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=True))
+        monkeypatch.setattr("notebooklm_mcp_server._create_client", finish_login)
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert "error" in result
+        assert app_context.client is other_client
+        mock_client.__aexit__.assert_awaited_once()
+        for client in (mock_client, other_client):
+            client.research.start.assert_not_awaited()
+            client.research.import_sources.assert_not_awaited()
+
+    async def test_login_for_intended_profile_can_start_research(self, mock_ctx, mock_client, app_context, monkeypatch):
+        app_context.client = None
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", AsyncMock(return_value=True))
+        monkeypatch.setattr("notebooklm_mcp_server._create_client", AsyncMock(return_value=mock_client))
+        result = await research_and_import("nb-1", "topic", max_results=1, ctx=mock_ctx)
+        assert result["imported"] == 1
+        mock_client.research.start.assert_awaited_once()
+
+    async def test_partial_acknowledgement(self, mock_ctx, mock_client):
+        result = await research_and_import("nb-1", "topic", max_results=2, ctx=mock_ctx)
+        mock_client.research.import_sources.assert_awaited_once_with(
+            "nb-1", task_id="research-1", sources=mock_client.research.poll.return_value["sources"][:2]
+        )
+        assert result["success"]
+        assert result["submitted"] == 2
+        assert result["acknowledged"] == 1
+        assert result["imported"] is None
+
+    @pytest.mark.parametrize(
+        ("poll", "error"),
+        [
+            ({"status": "no_research"}, "research-1"),
+            (
+                {
+                    "status": "completed",
+                    "task_id": "other",
+                    "sources": [{"title": "Wrong", "url": "https://example.org"}],
+                },
+                "other",
+            ),
+            ({"status": "in_progress", "task_id": "research-1"}, "timed out"),
+        ],
+    )
+    async def test_unsuccessful_poll_imports_nothing(self, mock_ctx, mock_client, poll, error):
+        mock_client.research.poll.return_value = poll
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert error in result["error"]
+        assert result["imported"] == 0
+        mock_client.research.import_sources.assert_not_awaited()
+
+    @pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+    async def test_stalled_poll_is_drained(self, mock_ctx, mock_client, monkeypatch, interrupt):
+        monkeypatch.setattr("notebooklm_mcp_server.RESEARCH_TIMEOUT", 0.05 if interrupt == "timeout" else 30)
+        started = asyncio.Event()
+        draining = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def stalled_poll(notebook_id):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                draining.set()
+                await finish.wait()
+
+        mock_client.research.poll.side_effect = stalled_poll
+        caller = asyncio.create_task(research_and_import("nb-1", "topic", ctx=mock_ctx))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            if interrupt == "cancel":
+                caller.cancel()
+            await asyncio.wait_for(draining.wait(), 2)
+            assert not caller.done()
+            finish.set()
+            if interrupt == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+            else:
+                result = await asyncio.wait_for(caller, 2)
+                assert "timed out" in result["error"]
+                assert result["imported"] == 0
+            mock_client.research.import_sources.assert_not_called()
+        finally:
+            finish.set()
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
 
     async def test_returns_error_on_auth_failure(self, mock_ctx, app_context):
         app_context.client = None
@@ -232,6 +812,43 @@ class TestGetAccountInfo:
         result = await get_account_info(mock_ctx)
         assert result["current_account"] == "test"
         assert "available_profiles" in result
+
+
+@pytest.mark.parametrize("failure", ["create", "persist", None])
+async def test_account_switch_transaction(failure, mock_ctx, mock_client, app_context, monkeypatch, tmp_path):
+    previous_home = str(tmp_path / ".notebooklm-test")
+    monkeypatch.setenv("NOTEBOOKLM_HOME", previous_home)
+    active = tmp_path / "active.json"
+    active.write_text('{"active": "test"}', encoding="utf-8")
+    monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", active)
+    target = tmp_path / ".notebooklm-work"
+    target.mkdir()
+    (target / "storage_state.json").touch()
+    candidate = AsyncMock()
+    factory = AsyncMock(return_value=candidate)
+    monkeypatch.setattr("notebooklm_mcp_server.NotebookLMClient.from_storage", factory)
+    if failure == "create":
+        factory.side_effect = ValueError("Synthetic client failure")
+    elif failure == "persist":
+        monkeypatch.setattr("notebooklm_mcp_server._write_active_profile", Mock(side_effect=OSError("Disk full")))
+
+    if failure:
+        with pytest.raises(ValueError if failure == "create" else OSError):
+            await switch_account("work", mock_ctx)
+        assert os.environ["NOTEBOOKLM_HOME"] == previous_home
+        assert app_context.profile == json.loads(active.read_text(encoding="utf-8"))["active"] == "test"
+        assert app_context.client is mock_client
+        mock_client.__aexit__.assert_not_awaited()
+        if failure == "persist":
+            candidate.__aexit__.assert_awaited_once()
+    else:
+        result = await switch_account("work", mock_ctx)
+        assert result["success"]
+        assert os.environ["NOTEBOOKLM_HOME"] == str(target)
+        assert app_context.profile == json.loads(active.read_text(encoding="utf-8"))["active"] == "work"
+        assert app_context.client is candidate
+        mock_client.__aexit__.assert_awaited_once()
+        factory.assert_awaited_once_with(path=str(target / "storage_state.json"))
 
 
 # ============================================================================

@@ -5,8 +5,12 @@ _write_active_profile, _current_profile_name, _find_cli.
 """
 
 import json
+import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from notebooklm_mcp_server import (
     _current_profile_name,
@@ -59,12 +63,42 @@ class TestReadActiveProfile:
 
 
 class TestWriteActiveProfile:
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX file permission bits")
+    def test_replacing_private_settings_keeps_owner_only_mode(self, tmp_path, monkeypatch):
+        path = tmp_path / "active.json"
+        path.write_text('{"active": "personal"}', encoding="utf-8")
+        path.chmod(0o600)
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", path)
+        previous_umask = os.umask(0o022)
+        try:
+            _write_active_profile("work")
+        finally:
+            os.umask(previous_umask)
+        assert _read_active_profile() == "work"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
     def test_writes_and_reads_back(self, tmp_path):
         path = tmp_path / "active.json"
         with patch("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", path):
             _write_active_profile("design")
             data = json.loads(path.read_text(encoding="utf-8"))
             assert data["active"] == "design"
+
+    def test_interrupted_write_keeps_saved_profile(self, tmp_path, monkeypatch):
+        path = tmp_path / "active.json"
+        original = b'{"active": "personal"}'
+        path.write_bytes(original)
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", path)
+
+        def partial_write(target, text, encoding):
+            target.write_bytes(b"{")
+            raise OSError("Disk full")
+
+        monkeypatch.setattr(Path, "write_text", partial_write)
+        with pytest.raises(OSError, match="Disk full"):
+            _write_active_profile("work")
+        assert path.read_bytes() == original
+        assert list(tmp_path.iterdir()) == [path]
 
 
 class TestCurrentProfileName:
@@ -81,6 +115,12 @@ class TestCurrentProfileName:
             patch.dict("os.environ", {"NOTEBOOKLM_HOME": str(Path.home() / ".notebooklm-work")}),
         ):
             assert _current_profile_name() == "work"
+
+    def test_keeps_custom_home_outside_named_account_directories(self, tmp_path, monkeypatch):
+        target = tmp_path / "elsewhere" / ".notebooklm-work"
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(target))
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", tmp_path / "active.json")
+        assert _resolve_profile_dir(_current_profile_name()) == target
 
     def test_defaults_to_personal(self, tmp_path):
         path = tmp_path / "nonexistent.json"
