@@ -1,13 +1,10 @@
-"""MCP protocol-level tests.
+"""Discover tools, resources, templates and prompts over production stdio.
 
-These tests verify that every tool is invocable through the MCP JSON-RPC
-protocol layer, exactly as Cursor or Claude Code would call them. This
-catches JSON Schema issues and parameter serialisation bugs.
-
-Discovery runs against the production process over stdio. In-memory
-invocations use the same registered tools with a synthetic SDK client.
+An in-memory MCP session checks all tool schemas and calls selected tools
+with a synthetic SDK client.
 """
 
+import asyncio
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -134,6 +131,40 @@ class TestProtocolToolInvocation:
         text = result.content[0].text
         data = json.loads(text)
         assert data["success"] is True
+
+    @pytest.mark.parametrize("late", [False, True], ids=["on_time", "after_deadline"])
+    async def test_research_poll_deadline(self, late, mcp_session, mock_client, monkeypatch):
+        loop = asyncio.get_running_loop()
+        clock = loop.time
+        source = {"title": "Requested source", "url": "https://example.org/source"}
+        timeout = 30
+        monkeypatch.setattr("notebooklm_mcp_server.RESEARCH_TIMEOUT", timeout)
+
+        async def poll(notebook_id):
+            assert clock() - started < timeout
+            if late:
+                # Advance the monotonic clock while the SDK owns the event-loop thread.
+                monkeypatch.setattr(loop, "time", lambda: clock() + timeout)
+            return {"task_id": "research-1", "status": "completed", "sources": [source]}
+
+        mock_client.research.poll.side_effect = poll
+        async with mcp_session as session:
+            started = clock()
+            result = await session.call_tool("research_and_import", {"notebook_id": "nb-proto", "query": "topic"})
+        assert not result.isError
+        mock_client.research.poll.assert_awaited_once_with("nb-proto")
+        data = json.loads(result.content[0].text)
+        if late:
+            assert loop.time() >= started + timeout
+            assert data.get("error") == "Research timed out"
+            assert data["imported"] == 0
+            mock_client.research.import_sources.assert_not_called()
+        else:
+            assert data["success"]
+            assert data["imported"] == 1
+            mock_client.research.import_sources.assert_awaited_once_with(
+                "nb-proto", task_id="research-1", sources=[source]
+            )
 
     async def test_add_sources_rejects_bad_json_via_protocol(self, mcp_session):
         async with mcp_session as session:

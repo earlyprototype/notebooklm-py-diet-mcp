@@ -149,6 +149,9 @@ def _find_cli() -> Path | None:
     return None
 
 
+LOGIN_TIMEOUT = 300
+
+
 async def _run_login(profile: str, ctx: Context | None = None) -> bool:
     """Launch notebooklm login for a profile and wait for completion."""
     cli = _find_cli()
@@ -169,20 +172,19 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
         )
 
     try:
-        process = subprocess.Popen(
+        with subprocess.Popen(
             [str(cli), "login"],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        _stdout, _stderr = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(None, process.communicate),
-            timeout=300,
-        )
-    except asyncio.TimeoutError:
-        with suppress(Exception):
-            process.kill()
-        return False
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            exited = asyncio.get_running_loop().run_in_executor(None, process.wait)
+            try:
+                await asyncio.wait_for(asyncio.shield(exited), timeout=LOGIN_TIMEOUT)
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await exited
     except Exception:
         return False
 
@@ -981,16 +983,24 @@ async def research_and_import(
         task_id = _research_field(task, "task_id")
         if not task_id:
             return {"query": query, "imported": 0, "error": "Research start returned no task ID"}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + RESEARCH_TIMEOUT
         results = await asyncio.wait_for(_poll_research(client.research, notebook_id, task_id), RESEARCH_TIMEOUT)
+        # A poll can return before the event loop delivers its overdue timeout.
+        if loop.time() >= deadline:
+            raise asyncio.TimeoutError
+        to_import = results[:max_results]
+        if to_import:
+            await ctx.info(f"Importing {len(to_import)} sources...")
+            if loop.time() >= deadline:
+                raise asyncio.TimeoutError
     except asyncio.TimeoutError:
         return {"query": query, "imported": 0, "error": "Research timed out"}
     except Exception as e:
         return {"query": query, "imported": 0, "error": str(e)}
 
     try:
-        to_import = results[:max_results]
         if to_import:
-            await ctx.info(f"Importing {len(to_import)} sources...")
             if not app.is_current(profile, client):
                 return {"query": query, "imported": 0, "error": "Active research profile changed before import"}
             import_result = await client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)

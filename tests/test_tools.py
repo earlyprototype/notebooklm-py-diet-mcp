@@ -624,6 +624,21 @@ class TestResearchAndImport:
         assert "profile" in result["error"].lower()
         assert result["imported"] == 0
 
+    async def test_deadline_expires_during_import_notification(self, mock_ctx, mock_client, monkeypatch):
+        loop = asyncio.get_running_loop()
+        clock = loop.time
+        monkeypatch.setattr("notebooklm_mcp_server.RESEARCH_TIMEOUT", 30)
+
+        async def delayed_notification(message):
+            if message.startswith("Importing"):
+                monkeypatch.setattr(loop, "time", lambda: clock() + 31)
+
+        mock_ctx.info.side_effect = delayed_notification
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        assert result.get("error") == "Research timed out"
+        assert result["imported"] == 0
+        mock_client.research.import_sources.assert_not_called()
+
     async def test_profile_switch_during_authentication_aborts_start(self, mock_ctx, mock_client, app_context):
         other_client = AsyncMock()
 
