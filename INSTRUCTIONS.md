@@ -37,7 +37,7 @@ IMPORTANT - generate_and_download tool:
 - Supported artifact types: report, audio, slide_deck, quiz, infographic
 - Correct file extensions for output_path:
     - report: .md (Markdown)
-    - audio: .m4a for MP4 audio. If the recording uses another encoding, use the extension returned in the error and retry with export_artifact and the generated artifact ID.
+    - audio: .m4a for MP4 audio, .wav for WAV, or .mp3 for MPEG Layer III. If the error identifies another supported encoding, retry export_artifact with that extension and the generated artifact ID.
     - slide_deck: .pdf
     - quiz: depends on quiz_output_format param (.json, .md, .html)
     - infographic: .png
@@ -56,6 +56,7 @@ IMPORTANT - research_and_import tool:
 - Researches a topic and imports the results as notebook sources in a single call
 - Params: query (search terms), source ("web" or "drive"), max_results (default 5)
 - The tool starts the research, polls until complete, and imports the top results automatically
+- A successful call reports how many sources it submitted and how many the SDK acknowledged. If these counts differ, imported is null. Check list_sources before retrying to avoid duplicate imports.
 - This replaces the manual three-step workflow of start -> poll -> import
 
 IMPORTANT - PDF / PNG conversion utilities:

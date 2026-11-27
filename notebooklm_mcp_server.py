@@ -511,10 +511,36 @@ _DOWNLOAD_FORMATS = {
 }
 
 
+class _ArtifactError(ValueError):
+    """An artifact diagnostic suitable for the tool response."""
+
+
+def _generation_failure(message: str, detail: str | None) -> _ArtifactError:
+    # Status text comes from the backend and can include download credentials.
+    if detail and "quota" in detail.lower():
+        message += " (quota)"
+    return _ArtifactError(message)
+
+
+def _artifact_error(operation: str, error: Exception) -> str:
+    # SDK versions may wrap the HTTP error. Only its numeric status is public.
+    cause = error
+    seen = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        status = getattr(getattr(cause, "response", None), "status_code", None)
+        if isinstance(status, int):
+            return f"{operation} failed (HTTP {status})"
+        cause = cause.__cause__ or cause.__context__
+    if isinstance(error, _ArtifactError) and "://" not in str(error):
+        return f"{operation} failed: {error}"
+    return f"{operation} failed ({type(error).__name__})"
+
+
 def _download_format(kind: str, path: str, requested: str) -> str:
     formats = _DOWNLOAD_FORMATS.get(kind)
     if not formats:
-        raise ValueError(f"Unsupported artifact type: {kind}")
+        raise _ArtifactError(f"Unsupported artifact type: {kind}")
     aliases = {"md": "markdown"}
     if kind == "audio":
         aliases["mp4"] = "m4a"
@@ -523,9 +549,9 @@ def _download_format(kind: str, path: str, requested: str) -> str:
     requested = requested.lower()
     fmt = aliases.get(requested, requested) or extension or formats[0]
     if fmt not in formats:
-        raise ValueError(f"Unsupported format for {kind}: {fmt}. Use: {', '.join(formats)}")
+        raise _ArtifactError(f"Unsupported format for {kind}: {fmt}. Use: {', '.join(formats)}")
     if extension and extension != fmt:
-        raise ValueError(f"File extension .{suffix} does not match the requested {fmt} format")
+        raise _ArtifactError(f"File extension .{suffix} does not match the requested {fmt} format")
     return fmt
 
 
@@ -534,35 +560,71 @@ def _generation_option(enum_type, value: str, **aliases):
     try:
         return enum_type[aliases.get(name, name).upper()]
     except KeyError as e:
-        raise ValueError(f"Unsupported {enum_type.__name__} option: {value}") from e
+        raise _ArtifactError(f"Unsupported {enum_type.__name__} option: {value}") from e
+
+
+def _media_format(path: Path) -> str | None:
+    import av
+
+    # Limit probing to local media containers. A playlist must not open secondary inputs.
+    options = {"format_whitelist": "wav,mp3,mov,aac", "protocol_whitelist": ""}
+    with path.open("rb") as stream, av.open(stream, options=options) as media:
+        audio = media.streams.audio
+        video = [s for s in media.streams.video if not s.disposition & av.stream.Disposition.attached_pic]
+        native = media.format.name
+        if "mp4" in native.split(","):
+            compatible = media.metadata.get("compatible_brands", "")
+            brands = [compatible[i : i + 4] for i in range(0, len(compatible), 4)]
+            brands.append(media.metadata.get("major_brand", ""))
+            if not any(brand.startswith(("iso", "mp4", "M4A", "M4V", "dash", "avc1", "MSNV")) for brand in brands):
+                return None
+            native = "mp4" if video else "m4a"
+        elif native == "mp3" and (not audio or audio[0].codec_context.codec.id != av.Codec("mp3", "r").id):
+            return None
+        tracks = video if native == "mp4" else audio
+        if tracks and next(media.decode(tracks[0]), None) is not None:
+            return native
+    return None
+
+
+def _validate_binary(path: Path, fmt: str) -> None:
+    import fitz
+
+    message = f"Downloaded file is not a readable {fmt.upper()} file"
+    # Release parser tracebacks and their file handles before cleaning up the staged file.
+    with suppress(OSError, ValueError, RuntimeError):
+        if fmt == "pdf":
+            with fitz.open(path) as doc:
+                if doc.is_pdf and doc.page_count and doc.load_page(0) is not None:
+                    return
+        elif fmt == "png":
+            with path.open("rb") as stream:
+                if stream.read(8) == b"\x89PNG\r\n\x1a\n" and fitz.Pixmap(str(path)).width:
+                    return
+        else:
+            native = _media_format(path)
+            if native == fmt:
+                return
+            if native == "aac":
+                message = f"NotebookLM supplied ADTS AAC. Export as {fmt.upper()} is unsupported for this recording."
+            elif native in _DOWNLOAD_FORMATS["audio"] and fmt in _DOWNLOAD_FORMATS["audio"]:
+                message += f". NotebookLM supplied {native} audio. Use the {native} output format."
+    raise _ArtifactError(message)
 
 
 async def _download_artifact(artifacts, notebook_id: str, artifact_id: str, kind: str, path: str, fmt: str):
     if not artifact_id:
-        raise ValueError("A download requires an artifact ID")
-    if kind == "audio":
-        # NotebookLM chooses the audio encoding. Publish the file only if its container matches.
+        raise _ArtifactError("A download requires an artifact ID")
+    download = getattr(artifacts, f"download_{kind}")
+    if kind in ("audio", "video", "slide_deck", "infographic"):
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(dir=destination.parent) as directory:
-            audio = Path(directory) / "audio"
-            await artifacts.download_audio(notebook_id, str(audio), artifact_id=artifact_id)
-            with audio.open("rb") as stream:
-                header = stream.read(12)
-            if header[4:8] == b"ftyp":
-                native = "m4a"
-            elif header[:4] == b"RIFF" and header[8:12] == b"WAVE":
-                native = "wav"
-            elif header.startswith(b"ID3") or int.from_bytes(header[:2], "big") & 0xFFE0 == 0xFFE0:
-                native = "mp3"
-            else:
-                raise ValueError("Unrecognized audio format in download")
-            if native != fmt:
-                raise ValueError(f"NotebookLM supplied {native} audio. Use the {native} output format.")
-            audio.replace(destination)
+            staged = Path(directory) / f"download.{fmt}"
+            await download(notebook_id, str(staged), artifact_id=artifact_id)
+            _validate_binary(staged, fmt)
+            staged.replace(destination)
         return
-
-    download = getattr(artifacts, f"download_{kind}")
     options = {"output_format": fmt} if kind in ("quiz", "flashcards") else {}
     await download(notebook_id, path, artifact_id=artifact_id, **options)
 
@@ -590,7 +652,7 @@ async def generate_and_download(
         output_path: Path where to save the downloaded file. Use the correct
             extension: .md (report), .pdf (slide_deck), .png (infographic),
             .m4a (native audio), .json/.md/.html (quiz, based on quiz_output_format).
-            If NotebookLM supplies another audio encoding, the error gives its extension.
+            If NotebookLM supplies WAV or MP3 audio, use the matching extension.
         instructions: Custom instructions for generation (optional).
             For slide decks, pass a design template here to control visual style.
         audio_format: Audio format: deep-dive, brief, critique, debate
@@ -611,6 +673,7 @@ async def generate_and_download(
     if artifact_type not in valid_types:
         return {"error": f"Unsupported artifact type: {artifact_type}. Use one of: {', '.join(sorted(valid_types))}"}
 
+    artifacts = app.client.artifacts
     await ctx.info(f"Generating {artifact_type}...")
 
     artifact_id = None
@@ -623,31 +686,31 @@ async def generate_and_download(
         if artifact_type == "audio":
             gen_kwargs["audio_format"] = _generation_option(AudioFormat, audio_format)
             gen_kwargs["audio_length"] = _generation_option(AudioLength, audio_length, medium="default")
-            status = await app.client.artifacts.generate_audio(notebook_id, **gen_kwargs)
+            status = await artifacts.generate_audio(notebook_id, **gen_kwargs)
         elif artifact_type == "report":
             report_kwargs: dict = {}
             if instructions:
                 report_kwargs["custom_prompt"] = instructions
-            status = await app.client.artifacts.generate_report(notebook_id, **report_kwargs)
+            status = await artifacts.generate_report(notebook_id, **report_kwargs)
         elif artifact_type == "slide_deck":
-            status = await app.client.artifacts.generate_slide_deck(notebook_id, **gen_kwargs)
+            status = await artifacts.generate_slide_deck(notebook_id, **gen_kwargs)
         elif artifact_type == "quiz":
             gen_kwargs["quantity"] = _generation_option(QuizQuantity, quiz_quantity, few="fewer")
             gen_kwargs["difficulty"] = _generation_option(QuizDifficulty, quiz_difficulty)
-            status = await app.client.artifacts.generate_quiz(notebook_id, **gen_kwargs)
+            status = await artifacts.generate_quiz(notebook_id, **gen_kwargs)
         elif artifact_type == "infographic":
-            status = await app.client.artifacts.generate_infographic(notebook_id, **gen_kwargs)
+            status = await artifacts.generate_infographic(notebook_id, **gen_kwargs)
 
-        if not status.task_id or status.is_failed:
-            raise ValueError(status.error or "Artifact generation did not start")
-        artifact_id = status.task_id
+        artifact_id = status.task_id or None
+        if not artifact_id or status.is_failed:
+            raise _generation_failure("Artifact generation did not start", status.error)
         await ctx.info(f"Waiting for {artifact_type} generation to complete...")
-        completed = await app.client.artifacts.wait_for_completion(notebook_id, artifact_id)
+        completed = await artifacts.wait_for_completion(notebook_id, artifact_id)
         if not completed.is_complete or completed.task_id != artifact_id:
-            raise ValueError(completed.error or f"Artifact {artifact_id} did not complete")
+            raise _generation_failure(f"Artifact {artifact_id} did not complete", completed.error)
 
         await ctx.info(f"Downloading {artifact_type} to {output_path}...")
-        await _download_artifact(app.client.artifacts, notebook_id, artifact_id, artifact_type, output_path, fmt)
+        await _download_artifact(artifacts, notebook_id, artifact_id, artifact_type, output_path, fmt)
 
         return {
             "artifact_type": artifact_type,
@@ -657,7 +720,11 @@ async def generate_and_download(
         }
 
     except Exception as e:
-        return {"artifact_type": artifact_type, "artifact_id": artifact_id, "error": str(e)}
+        return {
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+            "error": _artifact_error("generate_and_download", e),
+        }
 
 
 @mcp.tool()
@@ -716,17 +783,18 @@ async def export_artifact(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
 
+    artifacts = app.client.artifacts
     await ctx.info(f"Exporting artifact to: {output_path}")
     try:
-        artifact = await app.client.artifacts.get(notebook_id, artifact_id)
+        artifact = await artifacts.get(notebook_id, artifact_id)
         if artifact is None:
             return {"error": f"Artifact {artifact_id} not found"}
         kind = artifact.kind.value
         fmt = _download_format(kind, output_path, export_format)
-        await _download_artifact(app.client.artifacts, notebook_id, artifact_id, kind, output_path, fmt)
+        await _download_artifact(artifacts, notebook_id, artifact_id, kind, output_path, fmt)
         return {"artifact_id": artifact_id, "output_path": output_path, "success": True}
     except Exception as e:
-        return {"artifact_id": artifact_id, "error": str(e)}
+        return {"artifact_id": artifact_id, "error": _artifact_error("export_artifact", e)}
 
 
 # ============================================================================
@@ -772,7 +840,8 @@ async def research_and_import(
     """Research a topic and import the results as notebook sources in a single call.
 
     Starts a research task, polls until completion, and automatically imports
-    the top results.
+    the top results. A successful call reports submitted and acknowledged counts.
+    When the SDK acknowledges only part of a batch, imported is null.
 
     Args:
         notebook_id: ID of the notebook
@@ -787,15 +856,19 @@ async def research_and_import(
     if not await _ensure_authenticated(app, ctx):
         return {"error": "Authentication failed. Please check the logs."}
 
+    client = app.client
+    profile = app.profile
     await ctx.info(f"Researching: {query}")
     if max_results < 0:
         return {"query": query, "imported": 0, "error": "max_results must be nonnegative"}
     try:
-        task = await app.client.research.start(notebook_id, query, source=source)
+        if app.client is not client or app.profile != profile:
+            return {"query": query, "imported": 0, "error": "Active research profile changed before start"}
+        task = await client.research.start(notebook_id, query, source=source)
         task_id = _research_field(task, "task_id")
         if not task_id:
             return {"query": query, "imported": 0, "error": "Research start returned no task ID"}
-        results = await asyncio.wait_for(_poll_research(app.client.research, notebook_id, task_id), RESEARCH_TIMEOUT)
+        results = await asyncio.wait_for(_poll_research(client.research, notebook_id, task_id), RESEARCH_TIMEOUT)
     except asyncio.TimeoutError:
         return {"query": query, "imported": 0, "error": "Research timed out"}
     except Exception as e:
@@ -805,14 +878,20 @@ async def research_and_import(
         to_import = results[:max_results]
         if to_import:
             await ctx.info(f"Importing {len(to_import)} sources...")
-            import_result = await app.client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
+            if app.client is not client or app.profile != profile:
+                return {"query": query, "imported": 0, "error": "Active research profile changed before import"}
+            import_result = await client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
         else:
             import_result = {"imported": 0}
 
+        submitted = len(to_import)
+        acknowledged = len(import_result) if submitted else 0
         return {
             "query": query,
             "results_found": len(results),
-            "imported": len(import_result) if to_import else 0,
+            "submitted": submitted,
+            "acknowledged": acknowledged,
+            "imported": acknowledged if submitted == acknowledged else None,
             "import_details": import_result,
             "success": True,
         }
@@ -898,14 +977,16 @@ async def switch_account(
     previous = app.profile
 
     await ctx.info(f"Switching from '{previous}' to '{profile}'...")
-    if app.client is not None:
-        with suppress(Exception):
-            await app.client.__aexit__(None, None, None)
-
-    app.client = await _create_client(profile)
+    new_client = await _create_client(profile)
+    previous_client = app.client
+    app.client = new_client
     app.profile = profile
-
-    _write_active_profile(profile)
+    try:
+        _write_active_profile(profile)
+    finally:
+        if previous_client is not None:
+            with suppress(Exception):
+                await previous_client.__aexit__(None, None, None)
 
     await ctx.info(f"Switched to '{profile}' account")
 

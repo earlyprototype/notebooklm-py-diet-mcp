@@ -28,6 +28,7 @@ dependencies = [
     # which this server is built on. Stay on the 1.x line until it is ported.
     "mcp[cli]>=1.0.0,<2.0.0",
     "pymupdf>=1.24.0",
+    "av>=16.0.1",
 ]
 
 [project.optional-dependencies]

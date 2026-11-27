@@ -123,6 +123,16 @@ def make_mock_client():
     client.artifacts.wait_for_completion = AsyncMock(
         side_effect=lambda nb, task_id: GenerationStatus(task_id, "completed")
     )
+
+    def download_deck(notebook_id, output_path, artifact_id):
+        import fitz
+
+        with fitz.open() as doc:
+            doc.new_page().insert_text((32, 32), artifact_id)
+            doc.save(output_path)
+        return output_path
+
+    client.artifacts.download_slide_deck.side_effect = download_deck
     client.artifacts.list = AsyncMock(return_value=[])
     client.artifacts.get = AsyncMock(return_value=SimpleNamespace(id="art-1", title="Artifact"))
     client.artifacts.delete = AsyncMock(return_value=None)

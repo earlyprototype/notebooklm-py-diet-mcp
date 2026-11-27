@@ -120,14 +120,14 @@ class TestProtocolToolInvocation:
         data = json.loads(text)
         assert data["answer"] == "The key findings are..."
 
-    async def test_generate_and_download_via_protocol(self, mcp_session):
+    async def test_generate_and_download_via_protocol(self, mcp_session, tmp_path):
         async with mcp_session as session:
             result = await session.call_tool(
                 "generate_and_download",
                 {
                     "notebook_id": "nb-proto",
                     "artifact_type": "slide_deck",
-                    "output_path": "/tmp/test_slides.pdf",
+                    "output_path": str(tmp_path / "slides.pdf"),
                     "instructions": "Corporate style",
                 },
             )

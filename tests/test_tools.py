@@ -7,9 +7,14 @@ expected arguments and returns a well-structured result dict.
 import asyncio
 import json
 import wave
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import av
+import fitz
+import httpx
 import pytest
 from notebooklm import ArtifactType, AudioFormat, AudioLength, GenerationStatus, QuizDifficulty, QuizQuantity
 
@@ -180,11 +185,11 @@ class TestGenerateAndDownload:
         assert "wav" in mismatch["error"]
         assert not wrong_format.exists()
 
-    async def test_generates_and_downloads_slide_deck(self, mock_ctx, mock_client):
+    async def test_generates_and_downloads_slide_deck(self, mock_ctx, mock_client, tmp_path):
         result = await generate_and_download(
             "nb-1",
             "slide_deck",
-            "/tmp/out.pdf",
+            str(tmp_path / "slides.pdf"),
             instructions="Corporate style",
             ctx=mock_ctx,
         )
@@ -201,13 +206,20 @@ class TestGenerateAndDownload:
             "nb-1", "/tmp/out.json", artifact_id="task-quiz", output_format="json"
         )
 
-    async def test_generates_and_downloads_infographic(self, mock_ctx, mock_client):
-        result = await generate_and_download("nb-1", "infographic", "/tmp/out.png", ctx=mock_ctx)
+    async def test_generates_and_downloads_infographic(self, mock_ctx, mock_client, tmp_path):
+        def download_png(notebook_id, output_path, artifact_id):
+            pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), 0)
+            pixmap.clear_with(255)
+            pixmap.save(output_path)
+            return output_path
+
+        mock_client.artifacts.download_infographic.side_effect = download_png
+        output = tmp_path / "out.png"
+        result = await generate_and_download("nb-1", "infographic", str(output), ctx=mock_ctx)
         assert result["success"] is True
         mock_client.artifacts.generate_infographic.assert_awaited_once()
-        mock_client.artifacts.download_infographic.assert_awaited_once_with(
-            "nb-1", "/tmp/out.png", artifact_id="task-infographic"
-        )
+        assert mock_client.artifacts.download_infographic.await_args.kwargs["artifact_id"] == "task-infographic"
+        assert fitz.Pixmap(str(output)).width == 4
 
     async def test_failed_generation_does_not_download(self, mock_ctx, mock_client):
         mock_client.artifacts.wait_for_completion.side_effect = None
@@ -217,6 +229,15 @@ class TestGenerateAndDownload:
         result = await generate_and_download("nb-1", "report", "output.md", ctx=mock_ctx)
         assert "quota" in result["error"]
         mock_client.artifacts.download_report.assert_not_awaited()
+
+    async def test_failed_generation_keeps_sdk_status_details_private(self, mock_ctx, mock_client):
+        mock_client.artifacts.generate_report.return_value = GenerationStatus(
+            "task-report", "failed", error="download?signature=synthetic-marker"
+        )
+        result = await generate_and_download("nb-1", "report", "output.md", ctx=mock_ctx)
+        assert result["artifact_id"] == "task-report"
+        assert "generate_and_download" in result["error"]
+        assert "synthetic-marker" not in json.dumps(result)
 
     async def test_invalid_quiz_format_does_not_start_generation(self, mock_ctx, mock_client):
         result = await generate_and_download("nb-1", "quiz", "out.pdf", quiz_output_format="pdf", ctx=mock_ctx)
@@ -248,8 +269,6 @@ class TestListArtifacts:
 
 class TestExportArtifact:
     async def test_downloads_selected_pdf(self, mock_ctx, mock_client, tmp_path):
-        import fitz
-
         decks = {
             "earlier": SimpleNamespace(id="earlier", kind=ArtifactType.SLIDE_DECK),
             "task-slide_deck": SimpleNamespace(id="task-slide_deck", kind=ArtifactType.SLIDE_DECK),
@@ -307,6 +326,98 @@ class TestExportArtifact:
         )
 
 
+def encoded_media(container_format, codec):
+    buffer = BytesIO()
+    with av.open(buffer, mode="w", format=container_format) as container:
+        if codec == "mpeg4":
+            stream = container.add_stream(codec, rate=25)
+            stream.width = stream.height = 16
+            frame = av.VideoFrame(16, 16, "yuv420p")
+        else:
+            stream = container.add_stream(codec, rate=44100)
+            frame = av.AudioFrame(format="s16", layout="mono", samples=1024)
+            frame.sample_rate = 44100
+        for plane in frame.planes:
+            plane.update(bytes(plane.buffer_size))
+        for _ in range(1 if codec == "mpeg4" else 8):
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode())
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("kind", "fmt", "payload", "valid"),
+    [
+        ("infographic", "png", "jpeg", False),
+        ("infographic", "png", "png", True),
+        ("slide_deck", "pdf", "empty", False),
+        ("slide_deck", "pdf", "truncated_pdf", False),
+        ("audio", "mp3", "adts", False),
+        ("audio", "mp3", "mp3", True),
+        ("audio", "m4a", "m4a", True),
+        ("audio", "m4a", "mp4", False),
+        ("video", "mp4", "m4a", False),
+        ("video", "mp4", "mp4", True),
+    ],
+)
+async def test_binary_export_validates_before_replace(mock_ctx, mock_client, tmp_path, kind, fmt, payload, valid):
+    if payload in ("jpeg", "png"):
+        pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 4, 4), 0)
+        pixmap.clear_with(255)
+        data = pixmap.tobytes(payload)
+    elif payload in ("empty", "truncated_pdf"):
+        data = b"" if payload == "empty" else b"%PDF-1.7\n"
+    else:
+        container_format, codec = {
+            "mp3": ("mp3", "libmp3lame"),
+            "m4a": ("mp4", "aac"),
+            "mp4": ("mp4", "mpeg4"),
+            "adts": ("adts", "aac"),
+        }[payload]
+        data = encoded_media(container_format, codec)
+    mock_client.artifacts.get.return_value = SimpleNamespace(id="item", kind=ArtifactType(kind))
+    download = getattr(mock_client.artifacts, f"download_{kind}")
+    download.side_effect = lambda nb, path, artifact_id: Path(path).write_bytes(data)
+    output = tmp_path / f"existing.{fmt}"
+    output.write_bytes(b"previous contents")
+    result = await export_artifact("nb-1", "item", str(output), ctx=mock_ctx)
+    if valid:
+        assert result["success"], result
+        assert output.read_bytes() == data
+    else:
+        assert fmt in result["error"].lower()
+        if payload == "adts":
+            assert "AAC" in result["error"]
+        assert output.read_bytes() == b"previous contents"
+    assert list(tmp_path.iterdir()) == [output]
+
+
+@pytest.mark.parametrize("operation", ["generate_and_download", "export_artifact"])
+async def test_artifact_http_failure_preserves_file_and_omits_url(mock_ctx, mock_client, tmp_path, operation):
+    def failed_download(notebook_id, output_path, artifact_id):
+        Path(output_path).write_bytes(b"partial")
+        request = httpx.Request("GET", "https://example.invalid/download?signature=synthetic-marker")
+        httpx.Response(403, request=request).raise_for_status()
+
+    mock_client.artifacts.download_slide_deck.side_effect = failed_download
+    output = tmp_path / "slides.pdf"
+    output.write_bytes(b"existing")
+    if operation == "generate_and_download":
+        expected_id = "task-slide_deck"
+        result = await generate_and_download("nb-1", "slide_deck", str(output), ctx=mock_ctx)
+    else:
+        expected_id = "older"
+        mock_client.artifacts.get.return_value = SimpleNamespace(id=expected_id, kind=ArtifactType.SLIDE_DECK)
+        result = await export_artifact("nb-1", expected_id, str(output), ctx=mock_ctx)
+    assert "synthetic-marker" not in json.dumps(result)
+    assert "example.invalid" not in json.dumps(result)
+    assert result["artifact_id"] == expected_id
+    assert operation in result["error"]
+    assert "403" in result["error"]
+    assert output.read_bytes() == b"existing"
+    assert list(tmp_path.iterdir()) == [output]
+
+
 # ============================================================================
 # RESEARCH
 # ============================================================================
@@ -352,6 +463,32 @@ class TestResearchAndImport:
         result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
         assert result["success"], result
         mock_client.research.import_sources.assert_awaited_once_with("nb-1", task_id="requested", sources=(source,))
+
+    async def test_profile_switch_after_poll_aborts_import(self, mock_ctx, mock_client, app_context):
+        other_client = AsyncMock()
+
+        async def switch_before_import(message):
+            if message.startswith("Importing"):
+                app_context.client = other_client
+                app_context.profile = "other"
+
+        mock_ctx.info.side_effect = switch_before_import
+        result = await research_and_import("nb-1", "topic", ctx=mock_ctx)
+        mock_client.research.poll.assert_awaited_once()
+        mock_client.research.import_sources.assert_not_awaited()
+        other_client.research.import_sources.assert_not_awaited()
+        assert "profile" in result["error"].lower()
+        assert result["imported"] == 0
+
+    async def test_partial_acknowledgement(self, mock_ctx, mock_client):
+        result = await research_and_import("nb-1", "topic", max_results=2, ctx=mock_ctx)
+        mock_client.research.import_sources.assert_awaited_once_with(
+            "nb-1", task_id="research-1", sources=mock_client.research.poll.return_value["sources"][:2]
+        )
+        assert result["success"]
+        assert result["submitted"] == 2
+        assert result["acknowledged"] == 1
+        assert result["imported"] is None
 
     @pytest.mark.parametrize(
         ("poll", "error"),
