@@ -41,6 +41,7 @@ async def run_research(rows, mock_ctx, mock_client, monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reply)
     monkeypatch.setattr("notebooklm_mcp_server.asyncio", SimpleNamespace(sleep=AsyncMock()))
     monkeypatch.setenv("NOTEBOOKLM_BACKEND", "web")
+    monkeypatch.setenv("NOTEBOOKLM_TRANSPORT", "httpx")
     auth = AuthTokens(cookies={}, csrf_token="test", session_id="test")
     async with NotebookLMClient(auth) as client:
         mock_client.research = client.research
@@ -49,6 +50,8 @@ async def run_research(rows, mock_ctx, mock_client, monkeypatch):
 
 
 async def test_imports_completed_second_row(mock_ctx, mock_client, monkeypatch):
+    # An inherited transport must never route around the offline HTTPX responder.
+    monkeypatch.setenv("NOTEBOOKLM_TRANSPORT", "invalid-test-transport")
     rows = [task_row("newer", 2, "Newer"), task_row("requested", 2, "Requested")]
     result, calls, imports = await run_research(rows, mock_ctx, mock_client, monkeypatch)
 

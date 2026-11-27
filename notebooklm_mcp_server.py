@@ -24,8 +24,8 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -50,6 +50,15 @@ def _resolve_profile_dir(name: str) -> Path:
     return Path.home() / suffix
 
 
+def _set_sdk_home(home: str | None) -> None:
+    if home is None:
+        os.environ.pop("NOTEBOOKLM_HOME", None)
+    else:
+        os.environ["NOTEBOOKLM_HOME"] = home
+    # SDK 0.8.6 caches default_profile by config mtime across all homes.
+    _reset_config_cache()
+
+
 def _storage_path(profile_dir: Path) -> Path:
     """Resolve SDK storage within one diet account's NOTEBOOKLM_HOME."""
     # The SDK accepts a profile name but takes its home from the environment.
@@ -58,16 +67,10 @@ def _storage_path(profile_dir: Path) -> Path:
     if previous_home == str(profile_dir):
         return get_storage_path()
     try:
-        os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
-        # SDK 0.8.6 caches default_profile by config mtime across all homes.
-        _reset_config_cache()
+        _set_sdk_home(str(profile_dir))
         return get_storage_path()
     finally:
-        _reset_config_cache()
-        if previous_home is None:
-            del os.environ["NOTEBOOKLM_HOME"]
-        else:
-            os.environ["NOTEBOOKLM_HOME"] = previous_home
+        _set_sdk_home(previous_home)
 
 
 def _profile_name_for_dir(directory: Path) -> str:
@@ -110,6 +113,8 @@ class AppContext:
 
     client: NotebookLMClient | None
     profile: str
+    inline_auth: bool = False
+    account_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _find_cli() -> Path | None:
@@ -133,6 +138,7 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
 
     env = os.environ.copy()
     env["NOTEBOOKLM_HOME"] = str(target_dir)
+    env.pop("NOTEBOOKLM_AUTH_JSON", None)
 
     if ctx:
         await ctx.info(
@@ -152,6 +158,7 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
             asyncio.get_event_loop().run_in_executor(None, process.communicate),
             timeout=300,
         )
+        return process.returncode == 0 and _storage_path(target_dir).is_file()
     except asyncio.TimeoutError:
         with suppress(Exception):
             process.kill()
@@ -159,13 +166,11 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
     except Exception:
         return False
 
-    return process.returncode == 0 and _storage_path(target_dir).is_file()
 
-
-async def _create_client(profile: str) -> NotebookLMClient:
+async def _create_client(profile: str, *, inline_auth: bool = False) -> NotebookLMClient:
     """Create and initialise a NotebookLM client for the given profile."""
-    profile_dir = _resolve_profile_dir(profile)
-    client = await NotebookLMClient.from_storage(path=str(_storage_path(profile_dir)))
+    path = None if inline_auth else str(_storage_path(_resolve_profile_dir(profile)))
+    client = await NotebookLMClient.from_storage(path=path)
     if hasattr(client, "__aenter__"):
         await client.__aenter__()
     return client
@@ -182,32 +187,40 @@ async def _ensure_authenticated(
     2. Client exists but session is stale -- triggers re-login.
     3. Client exists and session is valid -- returns immediately.
     """
-    if app.client is not None:
-        try:
-            await app.client.notebooks.list()
-            return True
-        except Exception:
-            pass
+    async with app.account_lock:
+        if app.client is not None:
+            try:
+                await app.client.notebooks.list()
+                return True
+            except Exception:
+                pass
 
-    if app.client is None:
-        await ctx.info(
-            "No credentials found. Launching browser for authentication -- please sign into your Google account."
-        )
-    else:
-        await ctx.info("Session expired. Launching browser for re-authentication...")
+        if app.inline_auth:
+            await ctx.error("Update NOTEBOOKLM_AUTH_JSON and restart, or use switch_account to select a saved session.")
+            return False
 
-    success = await _run_login(app.profile, ctx)
-    if not success:
-        await ctx.error("Automatic re-authentication failed. Please run 'notebooklm login' manually in your terminal.")
-        return False
+        if app.client is None:
+            await ctx.info(
+                "No credentials found. Launching browser for authentication -- please sign into your Google account."
+            )
+        else:
+            await ctx.info("Session expired. Launching browser for re-authentication...")
 
-    if app.client is not None:
-        with suppress(Exception):
-            await app.client.__aexit__(None, None, None)
+        success = await _run_login(app.profile, ctx)
+        if not success:
+            await ctx.error(
+                "Automatic re-authentication failed. Please run 'notebooklm login' manually in your terminal."
+            )
+            return False
 
-    app.client = await _create_client(app.profile)
-    await ctx.info("Authentication successful. Resuming operation.")
-    return True
+        if app.client is not None:
+            with suppress(Exception):
+                await app.client.__aexit__(None, None, None)
+            app.client = None
+
+        app.client = await _create_client(app.profile)
+        await ctx.info("Authentication successful. Resuming operation.")
+        return True
 
 
 @asynccontextmanager
@@ -216,20 +229,24 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     profile = _current_profile_name()
     profile_dir = _resolve_profile_dir(profile)
 
-    client = None
-    if _storage_path(profile_dir).is_file():
-        try:
-            client = await _create_client(profile)
-        except Exception:
-            client = None
-
-    ctx = AppContext(client=client, profile=profile)
+    previous_home = os.environ.get("NOTEBOOKLM_HOME")
+    ctx = AppContext(client=None, profile=profile, inline_auth="NOTEBOOKLM_AUTH_JSON" in os.environ)
+    _set_sdk_home(str(profile_dir))
     try:
+        # Account management must still be served if the SDK rejects the active profile.
+        with suppress(Exception):
+            if ctx.inline_auth:
+                ctx.client = await _create_client(profile, inline_auth=True)
+            elif _storage_path(profile_dir).is_file():
+                ctx.client = await _create_client(profile)
         yield ctx
     finally:
-        if ctx.client is not None:
-            with suppress(Exception):
-                await ctx.client.__aexit__(None, None, None)
+        try:
+            if ctx.client is not None:
+                with suppress(Exception):
+                    await ctx.client.__aexit__(None, None, None)
+        finally:
+            _set_sdk_home(previous_home)
 
 
 mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
@@ -779,14 +796,15 @@ async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
 
     home = Path.home()
     candidates = {profile_dir, home / DEFAULT_PROFILES["personal"], *home.glob(".notebooklm-*")}
-    available = {
-        _profile_name_for_dir(path): str(path)
-        for path in sorted(candidates)
-        if path.is_dir() and _storage_path(path).is_file()
-    }
+    available = {}
+    for path in sorted(candidates):
+        with suppress(OSError, ValueError, RuntimeError):
+            if path.is_dir() and _storage_path(path).is_file():
+                available[_profile_name_for_dir(path)] = str(path)
 
     return {
         "current_account": app.profile,
+        "auth_source": "NOTEBOOKLM_AUTH_JSON" if app.inline_auth else "storage_state.json",
         "config_path": str(profile_dir),
         "available_profiles": available,
         "switch_instructions": (
@@ -823,24 +841,37 @@ async def switch_account(
     app = ctx.request_context.lifespan_context
     target_dir = _resolve_profile_dir(profile)
 
-    if not _storage_path(target_dir).is_file():
+    try:
+        has_storage = _storage_path(target_dir).is_file()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {"success": False, "error": f"Cannot resolve storage for profile '{profile}': {exc}"}
+    if not has_storage:
         return {
             "success": False,
             "error": f"No credentials found for profile '{profile}' at {target_dir}",
             "hint": (f"Authenticate first by running:\n  NOTEBOOKLM_HOME={target_dir} notebooklm login"),
         }
 
-    previous = app.profile
-
-    await ctx.info(f"Switching from '{previous}' to '{profile}'...")
-    if app.client is not None:
-        with suppress(Exception):
+    async with app.account_lock, AsyncExitStack() as rollback:
+        previous = app.profile
+        await ctx.info(f"Switching from '{previous}' to '{profile}'...")
+        if app.client is not None:
             await app.client.__aexit__(None, None, None)
+            rollback.push_async_callback(app.client.__aenter__)
 
-    app.client = await _create_client(profile)
-    app.profile = profile
-
-    _write_active_profile(profile)
+        # Refresh commands inherit the process home, including during client startup.
+        rollback.callback(_set_sdk_home, os.environ.get("NOTEBOOKLM_HOME"))
+        _set_sdk_home(str(target_dir))
+        try:
+            client = await _create_client(profile)
+            rollback.push_async_exit(client)
+            _write_active_profile(profile)
+        except Exception as exc:
+            return {"success": False, "error": f"Could not switch to profile '{profile}' ({type(exc).__name__})."}
+        app.client = client
+        app.profile = profile
+        app.inline_auth = False
+        rollback.pop_all()
 
     await ctx.info(f"Switched to '{profile}' account")
 
@@ -872,7 +903,11 @@ async def create_profile(
     """
     target_dir = _resolve_profile_dir(profile)
 
-    if _storage_path(target_dir).is_file():
+    try:
+        has_storage = _storage_path(target_dir).is_file()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {"success": False, "error": f"Cannot resolve storage for profile '{profile}': {exc}"}
+    if has_storage:
         return {
             "success": False,
             "error": f"Profile '{profile}' already exists at {target_dir}",
