@@ -8,7 +8,7 @@ Built on top of notebooklm-py: https://github.com/teng-lin/notebooklm-py
 
 Requires:
     - notebooklm-py >= 0.8.6
-    - mcp[cli] >= 1.0.0
+    - mcp[cli] >= 1.19.0, < 2.0.0
     - A valid NotebookLM authentication session (run: notebooklm login)
 
 Account selection:
@@ -34,6 +34,7 @@ from pathlib import Path
 from anyio import CancelScope
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import CallToolResult, TextContent
 from notebooklm import NotebookLMClient
 from notebooklm.paths import _reset_config_cache, get_home_dir, get_storage_path, resolve_profile
 
@@ -768,7 +769,6 @@ def _research_field(response, name, default=None):
     return getattr(response, name, default)
 
 
-@mcp.tool()
 async def research_and_import(
     notebook_id: str,
     query: str,
@@ -854,6 +854,18 @@ async def research_and_import(
 
     except Exception as e:
         return {"query": query, "error": str(e)}
+
+
+@mcp.tool()
+@wraps(research_and_import)
+async def research_and_import_tool(*args, **kwargs):
+    payload = await research_and_import(*args, **kwargs)
+    if "error" in payload:
+        return CallToolResult(
+            isError=True,
+            content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))],
+        )
+    return payload
 
 
 # ============================================================================

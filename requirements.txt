@@ -1,5 +1,5 @@
 notebooklm-py[browser]>=0.8.6
-mcp[cli]>=1.0.0,<2.0.0
+mcp[cli]>=1.19.0,<2.0.0
 playwright>=1.40.0
 
 

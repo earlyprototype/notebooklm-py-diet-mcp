@@ -55,6 +55,7 @@ IMPORTANT - research_and_import tool:
 - Researches a topic and imports the results as notebook sources in a single call
 - Params: query (search terms), source ("web" or "drive"), max_results (default 5)
 - The tool imports results only after the SDK reports completion for the task it started. Errors and cancellations stop polling. If the task is still pending or missing after 60 polls, the tool reports a timeout.
+- Failed calls set the MCP `isError` flag and include the reason in the JSON text. If the SDK confirms only some imports, the response includes the confirmed count and import details.
 - Switching accounts during polling interrupts the call. To research in the newly selected account, start a new call with a notebook ID from that account.
 
 IMPORTANT - PDF / PNG conversion utilities:
