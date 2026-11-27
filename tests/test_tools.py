@@ -468,6 +468,20 @@ async def test_media_download_uses_profile_credentials_with_inline_auth_set(
         assert output.is_file()
 
 
+@pytest.mark.parametrize(("kind", "extension"), [("audio", "m4a"), ("slide_deck", "pdf"), ("infographic", "png")])
+async def test_legacy_inline_auth_rejected_before_generation(
+    mock_ctx, mock_client, tmp_path, monkeypatch, kind, extension
+):
+    monkeypatch.setattr("notebooklm_mcp_server._PROFILE_AWARE_STORAGE", False)
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
+    output = tmp_path / f"result.{extension}"
+    result = await generate_and_download("notebook", kind, str(output), ctx=mock_ctx)
+    assert "NOTEBOOKLM_AUTH_JSON" in result["error"]
+    getattr(mock_client.artifacts, f"generate_{kind}").assert_not_called()
+    mock_client.artifacts.wait_for_completion.assert_not_called()
+    assert not output.exists()
+
+
 async def test_successful_sdk_download_omits_signed_url(mock_ctx, mock_client, tmp_path, monkeypatch, capsys, caplog):
     url = "https://fixture.googleusercontent.com/deck?sig=synthetic"
     with fitz.open() as doc:

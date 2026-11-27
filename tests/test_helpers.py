@@ -5,6 +5,8 @@ _write_active_profile, _current_profile_name, _find_cli.
 """
 
 import json
+import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,6 +63,20 @@ class TestReadActiveProfile:
 
 
 class TestWriteActiveProfile:
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX file permission bits")
+    def test_replacing_private_settings_keeps_owner_only_mode(self, tmp_path, monkeypatch):
+        path = tmp_path / "active.json"
+        path.write_text('{"active": "personal"}', encoding="utf-8")
+        path.chmod(0o600)
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", path)
+        previous_umask = os.umask(0o022)
+        try:
+            _write_active_profile("work")
+        finally:
+            os.umask(previous_umask)
+        assert _read_active_profile() == "work"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
     def test_writes_and_reads_back(self, tmp_path):
         path = tmp_path / "active.json"
         with patch("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", path):

@@ -1,16 +1,18 @@
 """Account switches overlapping artifact work, using two synthetic clients."""
 
 import asyncio
+import json
 import os
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from notebooklm import ArtifactType
+from notebooklm.auth import load_httpx_cookies
 
-from notebooklm_mcp_server import export_artifact, generate_and_download, switch_account
+from notebooklm_mcp_server import app_lifespan, export_artifact, generate_and_download, mcp, switch_account
 
 
 @pytest.fixture(params=["generate", "export"])
@@ -117,3 +119,58 @@ async def test_switch_during_download_keeps_original_credentials(
     assert (tmp_path / "report.md").read_text(encoding="utf-8") == result["artifact_id"]
     assert Path(os.environ["NOTEBOOKLM_HOME"]) == tmp_path / ".notebooklm-work"
     other_client.artifacts.download_report.assert_not_awaited()
+
+
+@pytest.mark.parametrize("switch_timing", ["before", "during"])
+async def test_legacy_download_reads_its_sessions_storage(switch_timing, mock_ctx, mock_client, tmp_path, monkeypatch):
+    homes = {name: tmp_path / f".notebooklm-{name}" for name in ("test", "work")}
+    for name, home in homes.items():
+        home.mkdir()
+        cookies = [{"name": key, "value": name, "domain": ".google.com"} for key in ("SID", "__Secure-1PSIDTS", "OSID")]
+        (home / "storage_state.json").write_text(json.dumps({"cookies": cookies}), encoding="utf-8")
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(homes["test"]))
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", tmp_path / "active.json")
+    monkeypatch.setattr("notebooklm_mcp_server._PROFILE_AWARE_STORAGE", False)
+    factory = AsyncMock(side_effect=[mock_client, AsyncMock(), AsyncMock()])
+    monkeypatch.setattr("notebooklm_mcp_server.NotebookLMClient.from_storage", factory)
+
+    peer_ctx = MagicMock()
+    peer_ctx.info = AsyncMock()
+    switch_started = asyncio.Event()
+
+    async def switch_peer():
+        switch_started.set()
+        return await switch_account("work", peer_ctx)
+
+    # SDK 0.3.2 looks up its cookie file after awaiting the artifact metadata.
+    write_deck = mock_client.artifacts.download_slide_deck.side_effect
+    observed = []
+    pending_switch = None
+
+    async def download(notebook_id, output_path, artifact_id):
+        nonlocal pending_switch
+        if switch_timing == "during":
+            pending_switch = asyncio.create_task(switch_peer())
+            await switch_started.wait()
+        observed.append(load_httpx_cookies()["SID"])
+        return write_deck(notebook_id, output_path, artifact_id)
+
+    mock_client.artifacts.download_slide_deck.side_effect = download
+    async with app_lifespan(mcp) as first, app_lifespan(mcp) as second:
+        mock_ctx.request_context.lifespan_context = first
+        peer_ctx.request_context.lifespan_context = second
+        output = str(tmp_path / "deck.pdf")
+        if switch_timing == "before":
+            assert (await switch_peer())["success"]
+            mock_client.artifacts.get.return_value = SimpleNamespace(id="selected", kind=ArtifactType.SLIDE_DECK)
+            result = await export_artifact("notebook", "selected", output, ctx=mock_ctx)
+        else:
+            result = await generate_and_download("notebook", "slide_deck", output, ctx=mock_ctx)
+        if pending_switch:
+            assert (await asyncio.wait_for(pending_switch, 5))["success"]
+        assert result["success"], result
+        assert observed == ["test"]
+        assert first.profile == "test" and second.profile == "work"
+        assert Path(os.environ["NOTEBOOKLM_HOME"]) == homes["work"]

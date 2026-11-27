@@ -51,7 +51,7 @@ IMPORTANT - list_artifacts and export_artifact:
 - list_artifacts shows previously generated artifacts in a notebook (optionally filtered by type)
 - export_artifact downloads a specific artifact by ID to a file
 - On POSIX systems, generated and exported files are readable and writable only by their owner.
-- With SDK 0.3.2, unset NOTEBOOKLM_AUTH_JSON when downloading media so the SDK uses the selected profile's credentials.
+- With SDK 0.3.2, unset NOTEBOOKLM_AUTH_JSON so media downloads use the selected profile's cookies. The server checks this before starting audio, slide deck, or infographic generation.
 - Use .csv for a data table, .json for a mind map and .mp4 for a video. Flashcards accept the same formats as quizzes.
 - Use these to retrieve content that was generated previously without regenerating it
 

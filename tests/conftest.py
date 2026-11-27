@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
 from notebooklm import GenerationStatus
@@ -152,13 +152,17 @@ def make_mock_client():
     )
 
     # ResearchAPI
+    async def legacy_poll(notebook_id):
+        """SDK 0.3.2 polls the notebook's most recent research task."""
+
     client.research.start = AsyncMock(return_value={"task_id": "research-1", "report_id": None})
-    client.research.poll = AsyncMock(
+    client.research.poll = create_autospec(
+        legacy_poll,
         return_value={
             "status": "completed",
             "task_id": "research-1",
             "sources": [{"url": f"https://example.org/{i}", "title": f"Source {i}"} for i in range(3)],
-        }
+        },
     )
     client.research.import_sources = AsyncMock(return_value=[{"id": "src-0", "title": "Source 0"}])
 

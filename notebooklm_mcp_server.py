@@ -26,10 +26,11 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
@@ -92,6 +93,7 @@ def _write_active_profile(name: str) -> None:
     """Persist the active profile name."""
     with TemporaryDirectory(dir=ACTIVE_PROFILE_PATH.parent) as directory:
         staged = Path(directory) / "active.json"
+        staged.touch(mode=0o600)
         staged.write_text(json.dumps({"active": name}, indent=2), encoding="utf-8")
         staged.replace(ACTIVE_PROFILE_PATH)
 
@@ -114,17 +116,24 @@ def _current_profile_name() -> str:
     return "personal"
 
 
+# HTTP sessions share the SDK home and on-disk login files. Keep each lock
+# alive while an operation holds or waits for it.
+_account_locks: WeakValueDictionary[Path | None, asyncio.Lock] = WeakValueDictionary()
+
+
+def _account_lock(profile: str | None = None) -> asyncio.Lock:
+    """Lock a profile's login file, or the process-wide SDK home when omitted."""
+    key = _resolve_profile_dir(profile).resolve() if profile is not None else None
+    return _account_locks.setdefault(key, asyncio.Lock())
+
+
 @dataclass
 class AppContext:
     """Application context with a switchable NotebookLM client."""
 
     client: NotebookLMClient | None
     profile: str
-    login_locks: dict[Path, asyncio.Lock] = field(default_factory=dict)
     switch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    def login_lock(self, profile: str) -> asyncio.Lock:
-        return self.login_locks.setdefault(_resolve_profile_dir(profile).resolve(), asyncio.Lock())
 
     def is_current(self, profile: str, client: NotebookLMClient | None) -> bool:
         return self.profile == profile and self.client is client
@@ -217,7 +226,7 @@ async def _ensure_authenticated(
     else:
         await ctx.info("Session expired. Launching browser for re-authentication...")
 
-    async with app.login_lock(profile):
+    async with _account_lock(profile):
         if not app.is_current(profile, previous_client):
             return None
         success = await _run_login(profile, ctx)
@@ -246,9 +255,10 @@ async def _ensure_authenticated(
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage NotebookLM client lifecycle."""
-    profile = _current_profile_name()
-    profile_dir = _resolve_profile_dir(profile)
-    os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
+    async with _account_lock():
+        profile = _current_profile_name()
+        profile_dir = _resolve_profile_dir(profile)
+        os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
     storage_file = _storage_path(profile_dir)
 
     client = None
@@ -675,24 +685,46 @@ def _validate_binary(path: Path, fmt: str) -> None:
     raise _ArtifactError(message)
 
 
+_BINARY_ARTIFACTS = {"audio", "video", "slide_deck", "infographic"}
+
+
+def _check_download_credentials(kind: str) -> None:
+    if kind in _BINARY_ARTIFACTS and not _PROFILE_AWARE_STORAGE and "NOTEBOOKLM_AUTH_JSON" in os.environ:
+        raise _ArtifactError("Unset NOTEBOOKLM_AUTH_JSON so the SDK downloads with the selected profile's cookies")
+
+
+@asynccontextmanager
+async def _legacy_media_home(profile: str) -> AsyncIterator[None]:
+    """Keep SDK 0.3.2's cookie lookup on this client's home until the download exits."""
+    async with _account_lock():
+        previous = os.environ.get("NOTEBOOKLM_HOME")
+        os.environ["NOTEBOOKLM_HOME"] = str(_resolve_profile_dir(profile))
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("NOTEBOOKLM_HOME", None)
+            else:
+                os.environ["NOTEBOOKLM_HOME"] = previous
+
+
 async def _download_artifact(
     app: AppContext, client: NotebookLMClient, notebook_id: str, artifact_id: str, kind: str, path: str, fmt: str
 ):
     if not artifact_id:
         raise _ArtifactError("A download requires an artifact ID")
+    _check_download_credentials(kind)
     download = getattr(client.artifacts, f"download_{kind}")
     options = {"output_format": fmt} if kind in ("quiz", "flashcards") else {}
-    binary = kind in ("audio", "video", "slide_deck", "infographic")
-    if binary and not _PROFILE_AWARE_STORAGE and "NOTEBOOKLM_AUTH_JSON" in os.environ:
-        raise _ArtifactError("Unset NOTEBOOKLM_AUTH_JSON so the SDK downloads with the selected profile's cookies")
+    binary = kind in _BINARY_ARTIFACTS
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=destination.parent) as directory:
         staged = Path(directory) / f"download.{fmt}"
-        # SDK 0.3.2 reads cookies from NOTEBOOKLM_HOME inside the download.
-        # A login can rewrite that file and a switch can change its directory.
-        async with app.login_lock(app.profile), app.switch_lock:
-            if app.client is not client:
+        profile = app.profile
+        home = _legacy_media_home(profile) if binary and not _PROFILE_AWARE_STORAGE else nullcontext()
+        async with _account_lock(profile), app.switch_lock, home:
+            if not app.is_current(profile, client):
                 raise _ArtifactError("Active account changed before download")
             await download(notebook_id, str(staged), artifact_id=artifact_id, **options)
         if binary:
@@ -755,6 +787,7 @@ async def generate_and_download(
         if app.client is not client:
             raise _ArtifactError("Active account changed before generation")
         fmt = _download_format(artifact_type, output_path, quiz_output_format if artifact_type == "quiz" else "")
+        _check_download_credentials(artifact_type)
         gen_kwargs: dict = {}
         if instructions:
             gen_kwargs["instructions"] = instructions
@@ -1058,15 +1091,16 @@ async def switch_account(
     async with app.switch_lock:
         new_client = await _create_client(profile)
         try:
-            _write_active_profile(profile)
-        except Exception:
+            async with _account_lock():
+                _write_active_profile(profile)
+                os.environ["NOTEBOOKLM_HOME"] = str(target_dir)
+        except BaseException:
             with suppress(Exception):
                 await new_client.__aexit__(None, None, None)
             raise
 
         previous = app.profile
         previous_client = app.client
-        os.environ["NOTEBOOKLM_HOME"] = str(target_dir)
         app.client = new_client
         app.profile = profile
         if previous_client is not None:
@@ -1101,9 +1135,8 @@ async def create_profile(
     Returns:
         Dictionary with the profile status and next steps.
     """
-    app = ctx.request_context.lifespan_context
     target_dir = _resolve_profile_dir(profile)
-    async with app.login_lock(profile):
+    async with _account_lock(profile):
         if _storage_path(target_dir).is_file():
             return {
                 "success": False,
