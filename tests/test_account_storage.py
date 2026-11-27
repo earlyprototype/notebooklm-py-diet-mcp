@@ -1,15 +1,21 @@
 """Account workflows with temporary SDK and legacy session-state files."""
 
+import asyncio
 import json
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from notebooklm._auth import refresh
-from notebooklm.paths import get_storage_path, profile_from_storage_path
+from notebooklm.paths import get_storage_path
 
 import notebooklm_mcp_server as server
+
+from .conftest import make_mock_client
 
 
 @pytest.fixture(params=["profiles/default/storage_state.json", "storage_state.json"], ids=["sdk", "legacy"])
@@ -72,9 +78,8 @@ async def test_failed_switch_restores_previous_client_and_home(tmp_path, mock_ct
         assert os.environ["NOTEBOOKLM_HOME"] == str(tmp_path / ".notebooklm")
 
 
-async def test_switch_routes_cold_and_mid_session_refresh_to_selected_home(
-    tmp_path, monkeypatch, mock_ctx, offline_token_fetch
-):
+@pytest.fixture
+def account_homes(tmp_path):
     for account, sdk_profile in [(".notebooklm", "personal-sdk"), (".notebooklm-work", "work-sdk")]:
         home = tmp_path / account
         state = home / "profiles" / sdk_profile / "storage_state.json"
@@ -82,6 +87,9 @@ async def test_switch_routes_cold_and_mid_session_refresh_to_selected_home(
         state.write_text(dummy_state(account), encoding="utf-8")
         (home / "config.json").write_text(json.dumps({"default_profile": sdk_profile}), encoding="utf-8")
 
+
+@pytest.fixture
+def hook_routes(monkeypatch):
     routes = []
 
     def record_hook(args, *, env, **kwargs):
@@ -94,19 +102,118 @@ async def test_switch_routes_cold_and_mid_session_refresh_to_selected_home(
     monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", "dummy-refresh")
     monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD_MIDSESSION", "1")
     monkeypatch.delenv("_NOTEBOOKLM_REFRESH_ATTEMPTED", raising=False)
-    offline_token_fetch.side_effect = [ValueError("Authentication expired"), ("dummy-csrf", "dummy-session")]
-    result = await server.switch_account("work", mock_ctx)
-    assert result["success"], result
-    client = mock_ctx.request_context.lifespan_context.client
-    try:
-        path = client.auth.storage_path
-        assert await refresh.try_refresh_cmd_reauth(
-            storage_path=path, cookie_jar=client.auth.cookie_jar, profile=profile_from_storage_path(path)
-        )
+    return routes
+
+
+@pytest.fixture
+def expired_notebooks_rpc(monkeypatch):
+    """Reject the first list call and the first homepage visit to trigger SDK recovery."""
+    expired_rpc = True
+    expired_home = True
+
+    async def reply(_transport, request):
+        nonlocal expired_rpc, expired_home
+        if request.method == "POST":
+            if expired_rpc:
+                expired_rpc = False
+                return httpx.Response(401)
+            payload = json.dumps([["wrb.fr", request.url.params["rpcids"], "[[]]"]])
+            return httpx.Response(200, text=")]}'\n\n" + f"{len(payload)}\n{payload}\n")
+        if request.url.host == "accounts.google.com":
+            return httpx.Response(200)
+        if expired_home:
+            expired_home = False
+            return httpx.Response(302, headers={"location": "https://accounts.google.com/ServiceLogin"})
+        return httpx.Response(200, text='{"SNlM0e":"dummy-csrf","FdrFJe":"dummy-session"}')
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reply)
+
+
+async def test_switch_routes_cold_and_mid_session_refresh_to_selected_home(
+    tmp_path, account_homes, hook_routes, mock_ctx, offline_token_fetch, expired_notebooks_rpc
+):
+    async with server.app_lifespan(server.mcp) as app:
+        mock_ctx.request_context.lifespan_context = app
+        offline_token_fetch.side_effect = [ValueError("Authentication expired"), ("dummy-csrf", "dummy-session")]
+        result = await server.switch_account("work", mock_ctx)
+        assert result["success"], result
+        assert await server.list_notebooks(mock_ctx) == "No notebooks found."
         work = tmp_path / ".notebooklm-work"
-        assert routes == [(str(work), "work-sdk", str(work / "profiles/work-sdk/storage_state.json"))] * 2
-    finally:
-        await client.__aexit__(None, None, None)
+        assert hook_routes == [(str(work), "work-sdk", str(work / "profiles/work-sdk/storage_state.json"))] * 2
+
+
+async def test_refresh_after_other_http_session_closes(
+    tmp_path, account_homes, hook_routes, mock_ctx, offline_token_fetch, expired_notebooks_rpc
+):
+    async with AsyncExitStack() as first:
+        await first.enter_async_context(server.app_lifespan(server.mcp))
+        async with server.app_lifespan(server.mcp) as second:
+            mock_ctx.request_context.lifespan_context = second
+            assert (await server.switch_account("work", mock_ctx))["success"]
+            await first.aclose()
+            assert (await server.get_account_info(mock_ctx))["current_account"] == "work"
+            assert await server.list_notebooks(mock_ctx) == "No notebooks found."
+            work = tmp_path / ".notebooklm-work"
+            assert hook_routes == [(str(work), "work-sdk", str(work / "profiles/work-sdk/storage_state.json"))]
+
+
+async def test_cancelled_request_settles_its_sdk_refresh(account_homes, mock_ctx, offline_token_fetch, monkeypatch):
+    refresh_started = asyncio.Event()
+    refresh_stopped = asyncio.Event()
+    release = asyncio.Event()
+
+    async def reply(_transport, request):
+        if request.method == "POST":
+            return httpx.Response(401)
+        refresh_started.set()
+        try:
+            await release.wait()
+        finally:
+            refresh_stopped.set()
+        return httpx.Response(200, text='{"SNlM0e":"dummy-csrf","FdrFJe":"dummy-session"}')
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reply)
+    async with server.app_lifespan(server.mcp) as app:
+        mock_ctx.request_context.lifespan_context = app
+        assert (await server.switch_account("work", mock_ctx))["success"]
+        request = asyncio.create_task(server.list_notebooks(mock_ctx))
+        try:
+            await asyncio.wait_for(refresh_started.wait(), timeout=5)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert refresh_stopped.is_set()
+            assert app.client.is_connected
+        finally:
+            release.set()
+
+
+@pytest.mark.parametrize("switch_before", ["first_poll", "import"])
+async def test_switch_interrupts_research(switch_before, tmp_path, monkeypatch, mock_ctx, mock_client):
+    write_state(tmp_path / ".notebooklm-work/profiles/default/storage_state.json")
+    work_client = make_mock_client()
+    monkeypatch.setattr(server, "_create_client", AsyncMock(return_value=work_client))
+
+    async def switch(*args):
+        mock_client.research.start.assert_awaited_once()
+        assert (await server.switch_account("work", mock_ctx))["success"]
+
+    if switch_before == "import":
+
+        async def switch_before_import(message):
+            if message.startswith("Importing "):
+                await switch()
+
+        mock_ctx.info.side_effect = switch_before_import
+    sleep = switch if switch_before == "first_poll" else AsyncMock()
+    monkeypatch.setattr(server, "asyncio", SimpleNamespace(sleep=sleep))
+    result = await server.research_and_import("nb-1", "test", ctx=mock_ctx)
+    assert "interrupt" in result["error"].lower()
+    assert not result.get("success")
+    assert mock_client.research.poll.await_count == (0 if switch_before == "first_poll" else 1)
+    work_client.research.poll.assert_not_awaited()
+    mock_client.research.import_sources.assert_not_awaited()
+    work_client.research.import_sources.assert_not_awaited()
 
 
 @pytest.fixture

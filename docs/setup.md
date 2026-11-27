@@ -65,6 +65,8 @@ Use a separate `NOTEBOOKLM_HOME` for each account, such as `~/.notebooklm` for p
 
 If `NOTEBOOKLM_AUTH_JSON` is set, the server uses it at startup, even when the account directory contains a saved session. Use `switch_account` to select a file-backed session at runtime. Unset `NOTEBOOKLM_AUTH_JSON` before restarting to keep using that saved account. `get_account_info` reports the authentication source and lists accounts with usable storage paths. If the active SDK profile is invalid, you can still use these tools to select another account.
 
+Each HTTP session keeps its own account selection. SDK-backed requests take turns because SDK 0.8.6 reads the process environment during refresh. Research releases the SDK between polls. If you switch accounts in that interval, the research call reports an interruption and skips import.
+
 ## Server Configuration
 
 If an existing configuration uses the `notebooklm-mcp` command, reinstall the diet package with `pip install -e .` and replace the command with the virtual environment's `bin/notebooklm-diet-mcp` or `Scripts\notebooklm-diet-mcp.exe` on Windows. Restart the MCP client and confirm that `research_and_import` appears in its tool list. The SDK uses `notebooklm-mcp` for its own server. The Python script configurations below also launch the diet server.
