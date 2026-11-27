@@ -693,20 +693,28 @@ async def research_and_import(
             return {"query": query, "error": "Research did not return a task ID."}
 
         poll = app.client.research.poll
-        # Older SDKs poll the whole notebook and return its most recent task.
         poll_kwargs = {"task_id": task_id} if "task_id" in inspect.signature(poll).parameters else {}
         poll_limit = 60
         for _ in range(poll_limit):
             await asyncio.sleep(2)
             poll_result = await poll(notebook_id, **poll_kwargs)
-            if _research_field(poll_result, "task_id", task_id) != task_id:
+            # Notebook-wide polls can put a newer task at the top level.
+            tasks = _research_field(poll_result, "tasks")
+            if not poll_kwargs and tasks is not None:
+                poll_result = next((entry for entry in tasks if _research_field(entry, "task_id") == task_id), None)
+                if poll_result is None:
+                    continue
+            polled_id = _research_field(poll_result, "task_id")
+            if polled_id is not None and polled_id != task_id:
                 continue
             error = _research_field(poll_result, "error")
             if error:
                 return {"query": query, "error": str(error)}
             status = _research_field(poll_result, "status")
             if status == "completed":
-                break
+                if polled_id == task_id:
+                    break
+                continue
             if status not in ("in_progress", "pending", "running", "no_research", "not_found"):
                 reason = _research_field(poll_result, "termination_reason") or status or "missing status"
                 return {"query": query, "error": f"Research task {task_id} did not complete ({reason})."}
@@ -721,16 +729,21 @@ async def research_and_import(
         if to_import:
             await ctx.info(f"Importing {len(to_import)} sources...")
             import_result = await app.client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
+            imported = len({source["id"] for source in import_result})
         else:
             import_result = {"imported": 0}
+            imported = 0
 
-        return {
+        result = {
             "query": query,
             "results_found": len(results),
-            "imported": len(to_import),
+            "imported": imported,
             "import_details": import_result,
-            "success": True,
+            "success": imported == len(to_import),
         }
+        if not result["success"]:
+            result["error"] = f"The SDK confirmed {imported} of {len(to_import)} requested source imports."
+        return result
 
     except Exception as e:
         return {"query": query, "error": str(e)}
