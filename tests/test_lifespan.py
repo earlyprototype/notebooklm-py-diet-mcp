@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -19,6 +19,7 @@ from notebooklm.paths import get_storage_path
 
 import notebooklm_mcp_server as server
 from notebooklm_mcp_server import AppContext, _run_login, app_lifespan, create_profile, get_account_info, switch_account
+from tests.conftest import wait_for_login_pid
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ async def test_interrupted_create_profile_reaps_before_unlock(
 
     def launch(args, env, **kwargs):
         nonlocal child
-        assert args == [sys.executable, "login"]
+        assert args[-1] == "login"
         assert env["NOTEBOOKLM_HOME"] == str(tmp_path / "disposable")
         child = popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env, **kwargs)
         wait, kill = child.wait, child.kill
@@ -163,6 +164,61 @@ async def test_successful_login_with_occupied_executor(
     done, _ = await asyncio.wait({login}, timeout=4)
     assert done, "login failed to observe child exit while the worker was occupied"
     assert login.result()["success"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console launcher and process handles")
+@pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
+async def test_installed_login_interpreter_exited_at_next_lock(
+    interrupt, tmp_path, monkeypatch, mock_ctx, synthetic_login_sdk
+):
+    import _winapi
+
+    import win32con
+
+    profile = tmp_path / "disposable"
+    monkeypatch.setenv("PYTHONPATH", synthetic_login_sdk)
+    monkeypatch.setattr(server, "_run_login", _run_login)
+    monkeypatch.setattr(server, "LOGIN_TIMEOUT", 3 if interrupt == "timeout" else 30)
+    first = asyncio.create_task(create_profile(str(profile), mock_ctx))
+    handle = None
+    tasks = [first]
+    try:
+        pid = await wait_for_login_pid(profile)
+        handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE | win32con.PROCESS_TERMINATE, False, pid)
+        assert _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT
+        observed = []
+
+        def check_storage(directory):
+            # create_profile checks for existing storage immediately under the lock.
+            observed.append(_winapi.WaitForSingleObject(handle, 0))
+            return directory / "login.pid"
+
+        monkeypatch.setattr(server, "_storage_path", check_storage)
+        second = asyncio.create_task(create_profile(str(profile), mock_ctx))
+        tasks.append(second)
+        await asyncio.sleep(0)
+        assert observed == []
+        if interrupt == "cancel":
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            assert not (await first)["success"]
+        assert "already exists" in (await second)["error"]
+        assert observed == [_winapi.WAIT_OBJECT_0]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if handle is not None:
+            try:
+                if _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT:
+                    # Windows also denies termination when exit is already in progress.
+                    with suppress(PermissionError):
+                        _winapi.TerminateProcess(handle, 1)
+                    assert _winapi.WaitForSingleObject(handle, 5000) == _winapi.WAIT_OBJECT_0
+            finally:
+                _winapi.CloseHandle(handle)
 
 
 async def test_cancel_at_child_exit_reaches_caller(monkeypatch, create_disposable_profile):

@@ -71,7 +71,7 @@ AUTOMATIC RE-AUTHENTICATION:
 - The server handles expired or missing Google sessions automatically
 - The server starts without validating the session, so it is always available
 - On the first tool call (and every subsequent call), the session is validated. If credentials are missing or expired, the server automatically launches a browser for Google sign-in, waits for the user to complete it, reconnects, and resumes the original operation
-- The user will see a browser window open and a message explaining what is happening -- no manual intervention is required beyond signing in
+- Complete sign-in in the browser. If the SDK prompts for Enter, press it in the login console on Windows or the server's controlling terminal on macOS and Linux.
 - If automatic re-authentication fails (e.g. browser automation unavailable), the server falls back to instructing the user to run notebooklm login manually
 
 ERROR HANDLING:

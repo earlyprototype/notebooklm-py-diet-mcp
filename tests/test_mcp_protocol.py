@@ -1,8 +1,8 @@
 """Discover tools, resources, templates and prompts over production stdio,
-read the notebooks resource and render the slide prompt.
+read the notebooks resource, render the slide prompt and cancel a login.
 
-In-memory sessions check tool schemas and invoke selected tools with a
-synthetic SDK client. The cancellation test calls the registered tool directly.
+In-memory sessions check schemas and invoke selected tools with a synthetic
+SDK client. The research cancellation test calls the registered tool directly.
 """
 
 import asyncio
@@ -13,11 +13,12 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, McpError, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from notebooklm_mcp_server import AppContext, mcp
+from tests.conftest import wait_for_login_pid
 
 
 @pytest.fixture
@@ -75,6 +76,46 @@ async def test_production_stdio_discovery(tmp_path):
     }
     assert "Tone: Bold, contemporary, confident, visually striking." in prompt.messages[0].content.text
     assert "notebook_id: demo" in prompt.messages[0].content.text
+
+
+async def test_stdio_cancels_login_reading_input_and_answers_ping(tmp_path, synthetic_login_sdk):
+    profile = tmp_path / "disposable"
+    server = StdioServerParameters(
+        command=sys.executable,
+        # Only the child login should import the synthetic SDK from PYTHONPATH.
+        args=["-I", str(Path(__file__).resolve().parents[1] / "notebooklm_mcp_server.py")],
+        cwd=tmp_path,
+        env={
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+            "NOTEBOOKLM_HOME": str(tmp_path / ".notebooklm"),
+            "PYTHONPATH": synthetic_login_sdk,
+            "TEST_LOGIN_READ_INPUT": "1",
+        },
+    )
+    async with (
+        stdio_client(server) as (reader, writer),
+        ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=10)) as session,
+    ):
+        await session.initialize()
+        request_id = session._request_id
+        login = asyncio.create_task(session.call_tool("create_profile", {"profile": str(profile)}))
+        try:
+            await wait_for_login_pid(profile)
+            await session.send_notification(
+                types.ClientNotification(
+                    types.CancelledNotification(params=types.CancelledNotificationParams(requestId=request_id))
+                )
+            )
+            with pytest.raises(McpError, match="Request cancelled"):
+                await login
+            assert isinstance(await session.send_ping(), types.EmptyResult)
+        finally:
+            login.cancel()
+            await asyncio.gather(login, return_exceptions=True)
+    assert not (profile / "unexpected-input").exists()
+    if sys.platform == "win32":
+        assert (profile / "confirmed").is_file(), "the login must receive Enter in its own console"
 
 
 class TestProtocolToolInvocation:

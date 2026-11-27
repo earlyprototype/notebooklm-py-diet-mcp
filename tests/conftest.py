@@ -3,6 +3,7 @@
 All tests are CI-safe: no Google credentials or network access required.
 """
 
+import asyncio
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,24 @@ import pytest
 from notebooklm import GenerationStatus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+@pytest.fixture
+def synthetic_login_sdk():
+    from notebooklm_mcp_server import _find_cli
+
+    assert _find_cli() is not None, "the test environment needs the SDK's installed notebooklm launcher"
+    return str(Path(__file__).parent / "fixtures" / "login_sdk")
+
+
+async def wait_for_login_pid(profile):
+    async def read_pid():
+        marker = profile / "login.pid"
+        while not marker.exists():
+            await asyncio.sleep(0.01)
+        return int(marker.read_text(encoding="ascii"))
+
+    return await asyncio.wait_for(read_pid(), timeout=10)
 
 
 @dataclass

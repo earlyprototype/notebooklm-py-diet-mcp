@@ -27,11 +27,12 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, nullcontext, suppress
+from contextlib import ExitStack, asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from weakref import WeakValueDictionary
+from zipfile import is_zipfile
 
 from anyio import CancelScope
 from anyio.lowlevel import checkpoint_if_cancelled
@@ -155,6 +156,27 @@ def _find_cli() -> Path | None:
 LOGIN_TIMEOUT = 300
 
 
+def _launch_login(cli: Path, env: dict[str, str]) -> subprocess.Popen:
+    if sys.platform == "win32":
+        # Run pip's console script in the interpreter we can kill and wait for.
+        # Like multiprocessing on Windows, bypass the venv's python.exe redirector.
+        entry_point = [str(cli)] if is_zipfile(cli) else ["-m", "notebooklm.notebooklm_cli"]
+        env["__PYVENV_LAUNCHER__"] = sys.executable
+        return subprocess.Popen(
+            [sys._base_executable, *entry_point, "login"],
+            env=env,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+
+    # The SDK's Enter prompt belongs on the controlling terminal. A detached
+    # server can still run SDK versions that detect browser sign-in themselves.
+    with ExitStack() as stack:
+        terminal = subprocess.DEVNULL
+        with suppress(OSError):
+            terminal = stack.enter_context(open("/dev/tty", "r+b", buffering=0))
+        return subprocess.Popen([str(cli), "login"], env=env, stdin=terminal, stdout=terminal, stderr=terminal)
+
+
 async def _kill_and_reap_login(process: subprocess.Popen, exited: asyncio.Future | None) -> None:
     process.kill()
     cancellation = None
@@ -198,12 +220,7 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
         # A login must observe its child's exit even when the default executor is busy.
         with (
             ThreadPoolExecutor(max_workers=1) as login_executor,
-            subprocess.Popen(
-                [str(cli), "login"],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            ) as process,
+            _launch_login(cli, env) as process,
         ):
             exited = None
             try:
