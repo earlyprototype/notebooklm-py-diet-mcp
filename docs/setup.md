@@ -61,9 +61,13 @@ notebooklm login
 notebooklm list
 ```
 
-You can authenticate multiple accounts by changing `NOTEBOOKLM_HOME` to a different directory for each (e.g. `~/.notebooklm-personal`, `~/.notebooklm-design`).
+Use a separate `NOTEBOOKLM_HOME` for each account, such as `~/.notebooklm` for personal and `~/.notebooklm-design` for design. SDK 0.8.6 stores a fresh default session at `profiles/default/storage_state.json` inside that directory. The SDK also recognizes the older `storage_state.json` at the account root.
 
 ## Server Configuration
+
+If an existing configuration uses the `notebooklm-mcp` command, reinstall the diet package with `pip install -e .` and replace the command with the virtual environment's `bin/notebooklm-diet-mcp` or `Scripts\notebooklm-diet-mcp.exe` on Windows. Restart the MCP client and confirm that `research_and_import` appears in its tool list. The SDK uses `notebooklm-mcp` for its own server. The Python script configurations below also launch the diet server.
+
+If you also use the SDK server, upgrading the diet package can remove the old shared executable. To restore it, check the SDK version with `pip show notebooklm-py`, then run `pip install --force-reinstall --no-deps "notebooklm-py==<installed-version>"` in the same environment.
 
 ### Cursor
 

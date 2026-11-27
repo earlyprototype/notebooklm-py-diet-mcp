@@ -95,6 +95,8 @@ pip install -r requirements.txt
 
 If you're updating an existing installation, rerun either install command above. Research polling requires `notebooklm-py` 0.8.6 or later to select the requested task and report cancellation.
 
+If your MCP client launches `notebooklm-mcp`, run `pip install -e .` in the virtual environment and change the configured command to `notebooklm-diet-mcp`. The SDK also supplies `notebooklm-mcp`. Restart the client and check its tool list for `research_and_import`. Configurations that launch `notebooklm_mcp_server.py` directly can keep using that script.
+
 ### 3. Install Playwright (required for first-time login and auto-reauthentication)
 
 ```bash

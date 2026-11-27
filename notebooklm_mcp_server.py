@@ -31,6 +31,7 @@ from pathlib import Path
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from notebooklm import NotebookLMClient
+from notebooklm.paths import _reset_config_cache, get_home_dir, get_storage_path
 
 ACTIVE_PROFILE_PATH = Path.home() / ".notebooklm-active.json"
 
@@ -47,6 +48,34 @@ def _resolve_profile_dir(name: str) -> Path:
         return Path(name)
     suffix = DEFAULT_PROFILES.get(name.lower(), f".notebooklm-{name.lower()}")
     return Path.home() / suffix
+
+
+def _storage_path(profile_dir: Path) -> Path:
+    """Resolve SDK storage within one diet account's NOTEBOOKLM_HOME."""
+    # The SDK accepts a profile name but takes its home from the environment.
+    # Restore the active home before any asynchronous work can run.
+    previous_home = os.environ.get("NOTEBOOKLM_HOME")
+    if previous_home == str(profile_dir):
+        return get_storage_path()
+    try:
+        os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
+        # SDK 0.8.6 caches default_profile by config mtime across all homes.
+        _reset_config_cache()
+        return get_storage_path()
+    finally:
+        _reset_config_cache()
+        if previous_home is None:
+            del os.environ["NOTEBOOKLM_HOME"]
+        else:
+            os.environ["NOTEBOOKLM_HOME"] = previous_home
+
+
+def _profile_name_for_dir(directory: Path) -> str:
+    for name, suffix in DEFAULT_PROFILES.items():
+        if directory == Path.home() / suffix:
+            return name
+    name = directory.name.removeprefix(".notebooklm-")
+    return name if _resolve_profile_dir(name) == directory else str(directory)
 
 
 def _read_active_profile() -> str | None:
@@ -72,15 +101,7 @@ def _current_profile_name() -> str:
     if saved:
         return saved
 
-    home = os.environ.get("NOTEBOOKLM_HOME", "")
-    if home:
-        folder = os.path.basename(os.path.expanduser(home))
-        for name, suffix in DEFAULT_PROFILES.items():
-            if folder == suffix:
-                return name
-        return folder.replace(".notebooklm-", "").replace(".notebooklm", "personal")
-
-    return "personal"
+    return _profile_name_for_dir(get_home_dir()) if os.environ.get("NOTEBOOKLM_HOME") else "personal"
 
 
 @dataclass
@@ -138,15 +159,13 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
     except Exception:
         return False
 
-    storage_file = target_dir / "storage_state.json"
-    return storage_file.exists() and process.returncode == 0
+    return process.returncode == 0 and _storage_path(target_dir).is_file()
 
 
 async def _create_client(profile: str) -> NotebookLMClient:
     """Create and initialise a NotebookLM client for the given profile."""
     profile_dir = _resolve_profile_dir(profile)
-    os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
-    client = await NotebookLMClient.from_storage()
+    client = await NotebookLMClient.from_storage(path=str(_storage_path(profile_dir)))
     if hasattr(client, "__aenter__"):
         await client.__aenter__()
     return client
@@ -196,10 +215,9 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage NotebookLM client lifecycle."""
     profile = _current_profile_name()
     profile_dir = _resolve_profile_dir(profile)
-    storage_file = profile_dir / "storage_state.json"
 
     client = None
-    if storage_file.exists():
+    if _storage_path(profile_dir).is_file():
         try:
             client = await _create_client(profile)
         except Exception:
@@ -759,17 +777,13 @@ async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
     app = ctx.request_context.lifespan_context
     profile_dir = _resolve_profile_dir(app.profile)
 
-    available = {}
-    for name, suffix in DEFAULT_PROFILES.items():
-        path = Path.home() / suffix
-        if path.exists() and (path / "storage_state.json").exists():
-            available[name] = str(path)
-
-    for p in Path.home().glob(".notebooklm-*"):
-        if p.is_dir() and (p / "storage_state.json").exists():
-            label = p.name.replace(".notebooklm-", "")
-            if label not in available:
-                available[label] = str(p)
+    home = Path.home()
+    candidates = {profile_dir, home / DEFAULT_PROFILES["personal"], *home.glob(".notebooklm-*")}
+    available = {
+        _profile_name_for_dir(path): str(path)
+        for path in sorted(candidates)
+        if path.is_dir() and _storage_path(path).is_file()
+    }
 
     return {
         "current_account": app.profile,
@@ -808,9 +822,8 @@ async def switch_account(
     """
     app = ctx.request_context.lifespan_context
     target_dir = _resolve_profile_dir(profile)
-    storage_file = target_dir / "storage_state.json"
 
-    if not storage_file.exists():
+    if not _storage_path(target_dir).is_file():
         return {
             "success": False,
             "error": f"No credentials found for profile '{profile}' at {target_dir}",
@@ -858,9 +871,8 @@ async def create_profile(
         Dictionary with the profile status and next steps.
     """
     target_dir = _resolve_profile_dir(profile)
-    storage_file = target_dir / "storage_state.json"
 
-    if storage_file.exists():
+    if _storage_path(target_dir).is_file():
         return {
             "success": False,
             "error": f"Profile '{profile}' already exists at {target_dir}",

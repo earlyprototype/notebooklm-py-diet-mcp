@@ -39,7 +39,7 @@ dev = [
 ]
 
 [project.scripts]
-notebooklm-mcp = "notebooklm_mcp_server:mcp.run"
+notebooklm-diet-mcp = "notebooklm_mcp_server:mcp.run"
 
 [project.urls]
 Repository = "https://github.com/earlyprototype/notebooklm-py-diet-mcp"
