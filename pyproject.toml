@@ -23,6 +23,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    "anyio>=4",
     "notebooklm-py[browser]>=0.3.2",
     # MCP SDK 2.0 removed mcp.server.fastmcp (replaced by mcp.server.mcpserver),
     # which this server is built on. Stay on the 1.x line until it is ported.

@@ -8,11 +8,13 @@ import asyncio
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from anyio import CancelScope
 from notebooklm.paths import get_storage_path
 
 import notebooklm_mcp_server as server
@@ -26,11 +28,28 @@ def create_disposable_profile(tmp_path, monkeypatch, mock_ctx):
     return partial(create_profile, str(tmp_path / "disposable"), mock_ctx)
 
 
-@pytest.mark.parametrize("interrupt", ["cancel", "timeout", "cancel_during_reap"])
+@pytest.fixture
+async def occupied_default_executor():
+    loop = asyncio.get_running_loop()
+    release = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        loop.set_default_executor(executor)
+        # The login's event loop has one worker, reserved until teardown.
+        worker = loop.run_in_executor(None, release.wait)
+        try:
+            yield
+        finally:
+            release.set()
+            await worker
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "timeout", "cancel_during_reap", "scope", "scope_during_reap"])
 async def test_interrupted_create_profile_reaps_before_unlock(
-    interrupt, tmp_path, monkeypatch, create_disposable_profile
+    interrupt, tmp_path, monkeypatch, create_disposable_profile, occupied_default_executor
 ):
-    monkeypatch.setattr(server, "LOGIN_TIMEOUT", 0.2 if interrupt == "timeout" else 30)
+    times_out = interrupt in {"timeout", "scope_during_reap"}
+    scope_cancelled = interrupt in {"scope", "scope_during_reap"}
+    monkeypatch.setattr(server, "LOGIN_TIMEOUT", 0.2 if times_out else 30)
     popen = subprocess.Popen
     launched = asyncio.Event()
     stopping = asyncio.Event()
@@ -58,7 +77,13 @@ async def test_interrupted_create_profile_reaps_before_unlock(
         return child
 
     monkeypatch.setattr(server.subprocess, "Popen", launch)
-    first = asyncio.create_task(create_disposable_profile())
+    scope = CancelScope()
+
+    async def first_login():
+        with scope:
+            return await create_disposable_profile()
+
+    first = asyncio.create_task(first_login())
     tasks = [first]
     first.add_done_callback(lambda _: stopping.set())
     try:
@@ -77,21 +102,39 @@ async def test_interrupted_create_profile_reaps_before_unlock(
         tasks.append(second)
         await asyncio.sleep(0)
         assert not observed_exit_codes
-        if interrupt != "timeout":
+        if interrupt == "scope":
+            scope.cancel()
+        elif not times_out:
             first.cancel()
         await asyncio.wait_for(stopping.wait(), 5)
         assert not first.done(), "create_profile released the lock before reaping its child"
+        if scope_cancelled:
+            # A cancelled outer scope retries at each checkpoint until shielded.
+            cancel = Mock(wraps=first.cancel)
+            monkeypatch.setattr(first, "cancel", cancel)
+            if times_out:
+                scope.cancel()
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert cancel.call_count == 0, "scope cancellation repeatedly interrupted the reap"
+            assert not first.done()
+            assert not observed_exit_codes
         if interrupt == "cancel_during_reap":
             assert first.cancel()
             await asyncio.sleep(0)
             assert not first.done()
         allow_reap.set()
-        if interrupt != "timeout":
+        _, pending = await asyncio.wait(tasks, timeout=3)
+        assert not pending, "profile operations stalled behind the occupied worker"
+        if scope_cancelled:
+            assert first.result() is None
+            assert scope.cancelled_caught
+        elif times_out:
+            assert not first.result()["success"]
+        else:
             with pytest.raises(asyncio.CancelledError):
                 await first
-        else:
-            assert not (await first)["success"]
-        assert "already exists" in (await asyncio.wait_for(second, 5))["error"]
+        assert "already exists" in second.result()["error"]
         assert child.returncode not in (None, 0)
         assert observed_exit_codes == [child.returncode]
     finally:
@@ -102,6 +145,24 @@ async def test_interrupted_create_profile_reaps_before_unlock(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_successful_login_with_occupied_executor(
+    monkeypatch, create_disposable_profile, occupied_default_executor
+):
+    monkeypatch.setattr(server, "LOGIN_TIMEOUT", 2)
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    popen = subprocess.Popen
+
+    def launch(args, env, **kwargs):
+        script = "from pathlib import Path; Path('storage_state.json').touch()"
+        return popen([sys.executable, "-c", script], cwd=env["NOTEBOOKLM_HOME"], env=env, **kwargs)
+
+    monkeypatch.setattr(server.subprocess, "Popen", launch)
+    login = asyncio.create_task(create_disposable_profile())
+    done, _ = await asyncio.wait({login}, timeout=4)
+    assert done, "login failed to observe child exit while the worker was occupied"
+    assert login.result()["success"]
 
 
 async def test_cancel_at_child_exit_reaches_caller(monkeypatch, create_disposable_profile):

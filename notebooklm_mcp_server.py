@@ -26,12 +26,15 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from weakref import WeakValueDictionary
 
+from anyio import CancelScope
+from anyio.lowlevel import checkpoint_if_cancelled
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from notebooklm import AudioFormat, AudioLength, NotebookLMClient, QuizDifficulty, QuizQuantity
@@ -155,18 +158,21 @@ LOGIN_TIMEOUT = 300
 async def _kill_and_reap_login(process: subprocess.Popen, exited: asyncio.Future | None) -> None:
     process.kill()
     cancellation = None
-    while process.returncode is None:
-        try:
-            if exited is not None and not exited.done():
-                await asyncio.wait({exited})
-            elif process.poll() is None:
-                # No executor waiter is available. poll() reaps without blocking the loop.
-                await asyncio.sleep(0.01)
-        except asyncio.CancelledError as exc:
-            # A cancellation during cleanup must also wait for the profile to be free.
-            cancellation = exc
+    with CancelScope(shield=True):
+        while process.returncode is None:
+            try:
+                if exited is not None and not exited.done():
+                    await asyncio.wait({exited})
+                elif process.poll() is None:
+                    # Fall back to a nonblocking reap if the waiter is unavailable.
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError as exc:
+                # Direct Task.cancel() can still interrupt an AnyIO shield.
+                cancellation = exc
     if cancellation is not None:
         raise cancellation
+    # Deliver an outer scope cancellation that arrived during timeout cleanup.
+    await checkpoint_if_cancelled()
 
 
 async def _run_login(profile: str, ctx: Context | None = None) -> bool:
@@ -189,15 +195,19 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
         )
 
     try:
-        with subprocess.Popen(
-            [str(cli), "login"],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ) as process:
+        # A login must observe its child's exit even when the default executor is busy.
+        with (
+            ThreadPoolExecutor(max_workers=1) as login_executor,
+            subprocess.Popen(
+                [str(cli), "login"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ) as process,
+        ):
             exited = None
             try:
-                exited = asyncio.get_running_loop().run_in_executor(None, process.wait)
+                exited = asyncio.get_running_loop().run_in_executor(login_executor, process.wait)
                 done, _ = await asyncio.wait({exited}, timeout=LOGIN_TIMEOUT)
                 if not done:
                     return False
