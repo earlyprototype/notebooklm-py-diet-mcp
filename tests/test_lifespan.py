@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from contextlib import nullcontext
+from functools import partial
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -18,11 +19,17 @@ import notebooklm_mcp_server as server
 from notebooklm_mcp_server import AppContext, _run_login, app_lifespan, create_profile, get_account_info, switch_account
 
 
-@pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
-async def test_interrupted_create_profile_reaps_before_unlock(interrupt, tmp_path, monkeypatch, mock_ctx):
-    profile = str(tmp_path / "disposable")
+@pytest.fixture
+def create_disposable_profile(tmp_path, monkeypatch, mock_ctx):
     monkeypatch.setattr(server, "_run_login", _run_login)
     monkeypatch.setattr(server, "_find_cli", lambda: sys.executable)
+    return partial(create_profile, str(tmp_path / "disposable"), mock_ctx)
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "timeout", "cancel_during_reap"])
+async def test_interrupted_create_profile_reaps_before_unlock(
+    interrupt, tmp_path, monkeypatch, create_disposable_profile
+):
     monkeypatch.setattr(server, "LOGIN_TIMEOUT", 0.2 if interrupt == "timeout" else 30)
     popen = subprocess.Popen
     launched = asyncio.Event()
@@ -33,7 +40,7 @@ async def test_interrupted_create_profile_reaps_before_unlock(interrupt, tmp_pat
     def launch(args, env, **kwargs):
         nonlocal child
         assert args == [sys.executable, "login"]
-        assert env["NOTEBOOKLM_HOME"] == profile
+        assert env["NOTEBOOKLM_HOME"] == str(tmp_path / "disposable")
         child = popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env, **kwargs)
         wait, kill = child.wait, child.kill
 
@@ -51,7 +58,7 @@ async def test_interrupted_create_profile_reaps_before_unlock(interrupt, tmp_pat
         return child
 
     monkeypatch.setattr(server.subprocess, "Popen", launch)
-    first = asyncio.create_task(create_profile(profile, mock_ctx))
+    first = asyncio.create_task(create_disposable_profile())
     tasks = [first]
     first.add_done_callback(lambda _: stopping.set())
     try:
@@ -66,16 +73,20 @@ async def test_interrupted_create_profile_reaps_before_unlock(interrupt, tmp_pat
             return storage
 
         monkeypatch.setattr(server, "_storage_path", existing_storage)
-        second = asyncio.create_task(create_profile(profile, mock_ctx))
+        second = asyncio.create_task(create_disposable_profile())
         tasks.append(second)
         await asyncio.sleep(0)
         assert not observed_exit_codes
-        if interrupt == "cancel":
+        if interrupt != "timeout":
             first.cancel()
         await asyncio.wait_for(stopping.wait(), 5)
         assert not first.done(), "create_profile released the lock before reaping its child"
+        if interrupt == "cancel_during_reap":
+            assert first.cancel()
+            await asyncio.sleep(0)
+            assert not first.done()
         allow_reap.set()
-        if interrupt == "cancel":
+        if interrupt != "timeout":
             with pytest.raises(asyncio.CancelledError):
                 await first
         else:
@@ -91,6 +102,51 @@ async def test_interrupted_create_profile_reaps_before_unlock(interrupt, tmp_pat
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_cancel_at_child_exit_reaches_caller(monkeypatch, create_disposable_profile):
+    popen = subprocess.Popen
+    monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kw: popen([sys.executable, "-c", "pass"], **kw))
+    loop = asyncio.get_running_loop()
+    submit = loop.run_in_executor
+    accepted = []
+
+    def wait_for_child(executor, wait):
+        exited = submit(executor, wait)
+        exited.add_done_callback(lambda _: accepted.append(login.cancel()))
+        return exited
+
+    monkeypatch.setattr(loop, "run_in_executor", wait_for_child)
+    login = asyncio.create_task(create_disposable_profile())
+    with pytest.raises(asyncio.CancelledError):
+        await login
+    assert accepted == [True]
+
+
+async def test_rejected_waiter_reaps_child_without_blocking_loop(monkeypatch, create_disposable_profile):
+    loop_thread = threading.get_ident()
+    blocking_waits = []
+    children = []
+
+    class LoginChild(subprocess.Popen):
+        def __init__(self, args, **kwargs):
+            super().__init__([sys.executable, "-c", "import time; time.sleep(0.5)"], **kwargs)
+            children.append(self)
+
+        def wait(self, *args, **kwargs):
+            if threading.get_ident() == loop_thread and self.returncode is None:
+                blocking_waits.append(self.pid)
+            return super().wait(*args, **kwargs)
+
+    def reject(executor, wait):
+        raise RuntimeError("Executor has shut down")
+
+    monkeypatch.setattr(server.subprocess, "Popen", LoginChild)
+    monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", reject)
+    assert not (await create_disposable_profile())["success"]
+    assert blocking_waits == []
+    (child,) = children
+    assert child.returncode not in (None, 0)
 
 
 @pytest.mark.parametrize("layout", ["fresh", "legacy", "both", "configured", "environment"])

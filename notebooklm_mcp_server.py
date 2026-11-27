@@ -152,6 +152,23 @@ def _find_cli() -> Path | None:
 LOGIN_TIMEOUT = 300
 
 
+async def _kill_and_reap_login(process: subprocess.Popen, exited: asyncio.Future | None) -> None:
+    process.kill()
+    cancellation = None
+    while process.returncode is None:
+        try:
+            if exited is not None and not exited.done():
+                await asyncio.wait({exited})
+            elif process.poll() is None:
+                # No executor waiter is available. poll() reaps without blocking the loop.
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError as exc:
+            # A cancellation during cleanup must also wait for the profile to be free.
+            cancellation = exc
+    if cancellation is not None:
+        raise cancellation
+
+
 async def _run_login(profile: str, ctx: Context | None = None) -> bool:
     """Launch notebooklm login for a profile and wait for completion."""
     cli = _find_cli()
@@ -178,13 +195,16 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ) as process:
-            exited = asyncio.get_running_loop().run_in_executor(None, process.wait)
+            exited = None
             try:
-                await asyncio.wait_for(asyncio.shield(exited), timeout=LOGIN_TIMEOUT)
+                exited = asyncio.get_running_loop().run_in_executor(None, process.wait)
+                done, _ = await asyncio.wait({exited}, timeout=LOGIN_TIMEOUT)
+                if not done:
+                    return False
+                exited.result()
             finally:
                 if process.returncode is None:
-                    process.kill()
-                    await exited
+                    await _kill_and_reap_login(process, exited)
     except Exception:
         return False
 
@@ -985,7 +1005,16 @@ async def research_and_import(
             return {"query": query, "imported": 0, "error": "Research start returned no task ID"}
         loop = asyncio.get_running_loop()
         deadline = loop.time() + RESEARCH_TIMEOUT
-        results = await asyncio.wait_for(_poll_research(client.research, notebook_id, task_id), RESEARCH_TIMEOUT)
+        poll = asyncio.create_task(_poll_research(client.research, notebook_id, task_id))
+        try:
+            done, _ = await asyncio.wait({poll}, timeout=RESEARCH_TIMEOUT)
+            if not done:
+                raise asyncio.TimeoutError
+        except BaseException:
+            poll.cancel()
+            await asyncio.gather(poll, return_exceptions=True)
+            raise
+        results = poll.result()
         # A poll can return before the event loop delivers its overdue timeout.
         if loop.time() >= deadline:
             raise asyncio.TimeoutError

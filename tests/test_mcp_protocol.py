@@ -1,7 +1,8 @@
-"""Discover tools, resources, templates and prompts over production stdio.
+"""Discover tools, resources, templates and prompts over production stdio,
+read the notebooks resource and render the slide prompt.
 
-An in-memory MCP session checks all tool schemas and calls selected tools
-with a synthetic SDK client.
+In-memory sessions check tool schemas and invoke selected tools with a
+synthetic SDK client. The cancellation test calls the registered tool directly.
 """
 
 import asyncio
@@ -165,6 +166,27 @@ class TestProtocolToolInvocation:
             mock_client.research.import_sources.assert_awaited_once_with(
                 "nb-proto", task_id="research-1", sources=[source]
             )
+
+    async def test_cancel_at_poll_completion_skips_import(self, monkeypatch, mock_client, mock_ctx):
+        loop = asyncio.get_running_loop()
+        accepted = []
+
+        def cancel_caller():
+            accepted.append(caller.cancel())
+
+        async def poll(notebook_id):
+            loop.call_soon(cancel_caller)
+            return {"task_id": "research-1", "status": "completed", "sources": [{"title": "Requested source"}]}
+
+        mock_client.research.poll.side_effect = poll
+        monkeypatch.setattr(mcp, "get_context", lambda: mock_ctx)
+        caller = asyncio.create_task(
+            mcp.call_tool("research_and_import", {"notebook_id": "nb-proto", "query": "topic"})
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert accepted == [True]
+        mock_client.research.import_sources.assert_not_called()
 
     async def test_add_sources_rejects_bad_json_via_protocol(self, mcp_session):
         async with mcp_session as session:

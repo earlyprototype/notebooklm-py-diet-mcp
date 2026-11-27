@@ -714,17 +714,42 @@ class TestResearchAndImport:
         assert result["imported"] == 0
         mock_client.research.import_sources.assert_not_awaited()
 
-    async def test_stalled_poll_respects_deadline(self, mock_ctx, mock_client, monkeypatch):
-        monkeypatch.setattr("notebooklm_mcp_server.RESEARCH_TIMEOUT", 0.05)
+    @pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+    async def test_stalled_poll_is_drained(self, mock_ctx, mock_client, monkeypatch, interrupt):
+        monkeypatch.setattr("notebooklm_mcp_server.RESEARCH_TIMEOUT", 0.05 if interrupt == "timeout" else 30)
+        started = asyncio.Event()
+        draining = asyncio.Event()
+        finish = asyncio.Event()
 
         async def stalled_poll(notebook_id):
-            await asyncio.Event().wait()
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                draining.set()
+                await finish.wait()
 
         mock_client.research.poll.side_effect = stalled_poll
-        result = await asyncio.wait_for(research_and_import("nb-1", "topic", ctx=mock_ctx), timeout=2)
-        assert "timed out" in result["error"]
-        assert result["imported"] == 0
-        mock_client.research.import_sources.assert_not_awaited()
+        caller = asyncio.create_task(research_and_import("nb-1", "topic", ctx=mock_ctx))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            if interrupt == "cancel":
+                caller.cancel()
+            await asyncio.wait_for(draining.wait(), 2)
+            assert not caller.done()
+            finish.set()
+            if interrupt == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+            else:
+                result = await asyncio.wait_for(caller, 2)
+                assert "timed out" in result["error"]
+                assert result["imported"] == 0
+            mock_client.research.import_sources.assert_not_called()
+        finally:
+            finish.set()
+            caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
 
     async def test_returns_error_on_auth_failure(self, mock_ctx, app_context):
         app_context.client = None
