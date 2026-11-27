@@ -4,24 +4,44 @@ All tests are CI-safe: no Google credentials or network access required.
 """
 
 import asyncio
+import shutil
 import sys
+import venv
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, create_autospec
+from zipfile import is_zipfile
 
+import notebooklm
 import pytest
 from notebooklm import GenerationStatus
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-@pytest.fixture
-def synthetic_login_sdk():
+@pytest.fixture(params=["installed", "non_zip"] if sys.platform == "win32" else ["installed"])
+def synthetic_login_sdk(request, tmp_path, monkeypatch):
     from notebooklm_mcp_server import _find_cli
 
-    assert _find_cli() is not None, "the test environment needs the SDK's installed notebooklm launcher"
-    return str(Path(__file__).parent / "fixtures" / "login_sdk")
+    cli = _find_cli()
+    assert cli is not None, "the test environment needs the SDK's installed notebooklm launcher"
+    fixture_sdk = Path(__file__).parent / "fixtures" / "login_sdk"
+    if sys.platform == "win32" and (request.param == "non_zip" or not is_zipfile(cli)):
+        # The isolated fallback ignores PYTHONPATH. Install the synthetic CLI
+        # in a disposable venv where the stdio server can still load the SDK.
+        environment = tmp_path / "login-venv"
+        venv.EnvBuilder().create(environment)
+        packages = environment / "Lib" / "site-packages"
+        sdk = Path(notebooklm.__file__).parent
+        shutil.copytree(sdk, packages / "notebooklm", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copyfile(fixture_sdk / "notebooklm" / "notebooklm_cli.py", packages / "notebooklm" / "notebooklm_cli.py")
+        (packages / "test_dependencies.pth").write_text(
+            f"import site; site.addsitedir({str(sdk.parent)!r})\n", encoding="utf-8"
+        )
+        (environment / "Scripts" / "notebooklm.exe").touch()
+        monkeypatch.setattr(sys, "executable", str(environment / "Scripts" / "python.exe"))
+    return str(fixture_sdk)
 
 
 async def wait_for_login_pid(profile):

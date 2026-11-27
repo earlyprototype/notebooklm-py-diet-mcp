@@ -166,6 +166,24 @@ async def test_successful_login_with_occupied_executor(
     assert login.result()["success"]
 
 
+def test_non_zip_windows_launcher_uses_isolated_sdk(tmp_path, monkeypatch):
+    cli = tmp_path / "notebooklm.exe"
+    cli.touch()
+    env = {"NOTEBOOKLM_HOME": str(tmp_path / "disposable")}
+    launch = Mock()
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NEW_CONSOLE", 0x10, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+
+    server._launch_login(cli, env)
+
+    launch.assert_called_once_with(
+        [sys._base_executable, "-I", "-m", "notebooklm.notebooklm_cli", "login"],
+        env={"NOTEBOOKLM_HOME": str(tmp_path / "disposable"), "__PYVENV_LAUNCHER__": sys.executable},
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+    )
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows console launcher and process handles")
 @pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
 async def test_installed_login_interpreter_exited_at_next_lock(
@@ -309,6 +327,47 @@ async def test_login_startup_and_switch_follow_sdk_storage(layout, tmp_path, mon
     async with app_lifespan(MagicMock()) as app:
         assert app.profile == "work"
         factory.assert_awaited_once_with(path=str(expected))
+
+
+@pytest.fixture
+def valid_account_among_invalid_profiles(tmp_path, monkeypatch):
+    if not server._PROFILE_AWARE_STORAGE:
+        pytest.skip("This SDK uses a single storage file per account")
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    for suffix in (".notebooklm", ".notebooklm-custom"):
+        home = tmp_path / suffix
+        (home / "profiles").mkdir(parents=True)
+        (home / "config.json").write_text('{"default_profile": "."}', encoding="utf-8")
+        (home / "profiles" / "storage_state.json").touch()
+    work = tmp_path / ".notebooklm-work"
+    work.mkdir()
+    (work / "storage_state.json").touch()
+    return work
+
+
+async def test_invalid_active_sdk_profile_allows_switch(
+    valid_account_among_invalid_profiles, tmp_path, monkeypatch, mock_ctx
+):
+    active = tmp_path / "active.json"
+    active.write_text('{"active": "personal"}', encoding="utf-8")
+    monkeypatch.setattr(server, "ACTIVE_PROFILE_PATH", active)
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path / ".notebooklm"))
+    factory = AsyncMock(return_value=AsyncMock())
+    monkeypatch.setattr(server.NotebookLMClient, "from_storage", factory)
+
+    async with app_lifespan(server.mcp) as app:
+        assert app.profile == "personal"
+        assert app.client is None
+        factory.assert_not_awaited()
+        mock_ctx.request_context.lifespan_context = app
+        assert (await switch_account("work", mock_ctx))["success"]
+        assert app.profile == "work"
+        factory.assert_awaited_once_with(path=str(valid_account_among_invalid_profiles / "storage_state.json"))
+
+
+async def test_discovery_skips_invalid_sdk_profiles(valid_account_among_invalid_profiles, mock_ctx):
+    info = await get_account_info(mock_ctx)
+    assert info["available_profiles"] == {"work": str(valid_account_among_invalid_profiles)}
 
 
 class TestLifespanValidCredentials:

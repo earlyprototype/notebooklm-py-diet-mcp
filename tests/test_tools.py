@@ -57,6 +57,51 @@ class TestListNotebooks:
         result = await list_notebooks_tool(mock_ctx)
         assert "error" in result
 
+    @pytest.mark.parametrize("switches", [(), ("work",), ("work", "test")], ids=["refresh", "switch", "switch_back"])
+    async def test_concurrent_login(self, switches, mock_ctx, app_context, mock_client, tmp_path, monkeypatch):
+        app_context.client = None
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def login(profile, ctx):
+            started.set()
+            await finish.wait()
+            return True
+
+        authenticate = AsyncMock(side_effect=login)
+        monkeypatch.setattr("notebooklm_mcp_server._run_login", authenticate)
+        factory = AsyncMock(return_value=mock_client)
+        monkeypatch.setattr("notebooklm_mcp_server._create_client", factory)
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", tmp_path / "active.json")
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path / ".notebooklm-test"))
+
+        calls = [asyncio.create_task(list_notebooks_tool(mock_ctx))]
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            calls.append(asyncio.create_task(list_notebooks_tool(mock_ctx)))
+            await asyncio.sleep(0)  # Let the second call reach the locked profile.
+            assert not calls[1].done()
+            for profile in switches:
+                directory = tmp_path / f".notebooklm-{profile}"
+                directory.mkdir()
+                (directory / "storage_state.json").touch()
+                assert (await switch_account(profile, mock_ctx))["success"]
+        finally:
+            finish.set()
+            results = await asyncio.wait_for(asyncio.gather(*calls), 5)
+
+        first, second = results
+        authenticate.assert_awaited_once_with("test", mock_ctx)
+        if switches:
+            assert "error" in first and "error" in second
+            assert factory.await_count == len(switches)
+            mock_client.notebooks.list.assert_not_awaited()
+        else:
+            assert first["count"] == 2
+            assert second == first
+            factory.assert_awaited_once_with("test")
+            assert mock_client.notebooks.list.await_count == 2
+
 
 class TestCreateNotebook:
     async def test_creates_notebook(self, mock_ctx, mock_client):

@@ -84,6 +84,14 @@ def _storage_path(home: Path) -> Path:
     return storage
 
 
+def _has_profile_storage(home: Path) -> bool:
+    """An invalid SDK profile is unavailable for startup or discovery."""
+    try:
+        return home.is_dir() and _storage_path(home).is_file()
+    except ValueError:
+        return False
+
+
 def _read_active_profile() -> str | None:
     """Read the persisted active profile name, if any."""
     try:
@@ -138,6 +146,7 @@ class AppContext:
     client: NotebookLMClient | None
     profile: str
     switch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    switch_count: int = 0
 
     def is_current(self, profile: str, client: NotebookLMClient | None) -> bool:
         return self.profile == profile and self.client is client
@@ -160,7 +169,7 @@ def _launch_login(cli: Path, env: dict[str, str]) -> subprocess.Popen:
     if sys.platform == "win32":
         # Run pip's console script in the interpreter we can kill and wait for.
         # Like multiprocessing on Windows, bypass the venv's python.exe redirector.
-        entry_point = [str(cli)] if is_zipfile(cli) else ["-m", "notebooklm.notebooklm_cli"]
+        entry_point = [str(cli)] if is_zipfile(cli) else ["-I", "-m", "notebooklm.notebooklm_cli"]
         env["__PYVENV_LAUNCHER__"] = sys.executable
         return subprocess.Popen(
             [sys._base_executable, *entry_point, "login"],
@@ -261,10 +270,16 @@ async def _ensure_authenticated(
     """
     profile = app.profile
     previous_client = app.client
+    switch_count = app.switch_count
+
+    def still_selected() -> bool:
+        # A switch away and back also invalidates calls waiting for this login.
+        return app.switch_count == switch_count and app.profile == profile
+
     if previous_client is not None:
         try:
             await previous_client.notebooks.list()
-            return previous_client if app.is_current(profile, previous_client) else None
+            return app.client if still_selected() else None
         except Exception:
             pass
 
@@ -276,8 +291,10 @@ async def _ensure_authenticated(
         await ctx.info("Session expired. Launching browser for re-authentication...")
 
     async with _account_lock(profile):
-        if not app.is_current(profile, previous_client):
+        if not still_selected():
             return None
+        if app.client is not previous_client:
+            return app.client  # Another call refreshed this account under the lock.
         success = await _run_login(profile, ctx)
         if not success:
             await ctx.error(
@@ -285,10 +302,10 @@ async def _ensure_authenticated(
             )
             return None
 
-        if not app.is_current(profile, previous_client):
+        if not still_selected():
             return None
         new_client = await _create_client(profile)
-        if not app.is_current(profile, previous_client):
+        if not still_selected():
             with suppress(Exception):
                 await new_client.__aexit__(None, None, None)
             return None
@@ -298,7 +315,7 @@ async def _ensure_authenticated(
             with suppress(Exception):
                 await previous_client.__aexit__(None, None, None)
     await ctx.info("Authentication successful. Resuming operation.")
-    return new_client if app.is_current(profile, new_client) else None
+    return app.client if still_selected() else None
 
 
 @asynccontextmanager
@@ -308,10 +325,9 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         profile = _current_profile_name()
         profile_dir = _resolve_profile_dir(profile)
         os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
-    storage_file = _storage_path(profile_dir)
 
     client = None
-    if storage_file.is_file():
+    if _has_profile_storage(profile_dir):
         try:
             client = await _create_client(profile)
         except Exception:
@@ -1098,11 +1114,11 @@ async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
     available = {}
     for name, suffix in DEFAULT_PROFILES.items():
         path = Path.home() / suffix
-        if path.is_dir() and _storage_path(path).is_file():
+        if _has_profile_storage(path):
             available[name] = str(path)
 
     for p in Path.home().glob(".notebooklm-*"):
-        if p.is_dir() and _storage_path(p).is_file():
+        if _has_profile_storage(p):
             label = p.name.replace(".notebooklm-", "")
             if label not in available:
                 available[label] = str(p)
@@ -1169,6 +1185,7 @@ async def switch_account(
         previous_client = app.client
         app.client = new_client
         app.profile = profile
+        app.switch_count += 1
         if previous_client is not None:
             with suppress(Exception):
                 await previous_client.__aexit__(None, None, None)

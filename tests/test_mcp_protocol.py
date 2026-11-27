@@ -1,8 +1,9 @@
-"""Discover tools, resources, templates and prompts over production stdio,
-read the notebooks resource, render the slide prompt and cancel a login.
+"""Discover tools, resources, templates and prompts over production stdio.
 
-In-memory sessions check schemas and invoke selected tools with a synthetic
-SDK client. The research cancellation test calls the registered tool directly.
+Stdio sessions read the notebooks resource, render the slide prompt and answer
+a ping after cancelling create_profile. In-memory sessions check schemas and
+invoke selected tools, including research_and_import with on-time and late
+poll results. The research cancellation test calls the registered tool directly.
 """
 
 import asyncio
@@ -82,7 +83,7 @@ async def test_stdio_cancels_login_reading_input_and_answers_ping(tmp_path, synt
     profile = tmp_path / "disposable"
     server = StdioServerParameters(
         command=sys.executable,
-        # Only the child login should import the synthetic SDK from PYTHONPATH.
+        # Start the server with its installed SDK regardless of the child's PYTHONPATH.
         args=["-I", str(Path(__file__).resolve().parents[1] / "notebooklm_mcp_server.py")],
         cwd=tmp_path,
         env={
