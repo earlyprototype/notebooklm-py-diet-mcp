@@ -100,6 +100,12 @@ class TestCurrentProfileName:
         ):
             assert _current_profile_name() == "work"
 
+    def test_keeps_custom_home_outside_named_account_directories(self, tmp_path, monkeypatch):
+        target = tmp_path / "elsewhere" / ".notebooklm-work"
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(target))
+        monkeypatch.setattr("notebooklm_mcp_server.ACTIVE_PROFILE_PATH", tmp_path / "active.json")
+        assert _resolve_profile_dir(_current_profile_name()) == target
+
     def test_defaults_to_personal(self, tmp_path):
         path = tmp_path / "nonexistent.json"
         with (

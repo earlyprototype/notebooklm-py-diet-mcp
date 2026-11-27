@@ -4,6 +4,7 @@ ACCOUNT CONTEXT:
 - Multiple Google accounts are supported via named profiles (e.g. work, personal, design)
 - Use get_account_info to see the active account and all available profiles
 - Use switch_account to change the active profile at runtime -- no restart required
+- Generate and export use the account selected when the tool starts. A switch during session validation aborts the request. A switch during download waits until the file is saved.
 - Use create_profile to set up a new account -- this launches a browser for Google sign-in
 - The active profile is persisted across server restarts in ~/.notebooklm-active.json
 - Workflow for a new account: create_profile -> (user signs in) -> switch_account
@@ -49,6 +50,8 @@ IMPORTANT - generate_and_download tool:
 IMPORTANT - list_artifacts and export_artifact:
 - list_artifacts shows previously generated artifacts in a notebook (optionally filtered by type)
 - export_artifact downloads a specific artifact by ID to a file
+- On POSIX systems, generated and exported files are readable and writable only by their owner.
+- With SDK 0.3.2, unset NOTEBOOKLM_AUTH_JSON when downloading media so the SDK uses the selected profile's credentials.
 - Use .csv for a data table, .json for a mind map and .mp4 for a video. Flashcards accept the same formats as quizzes.
 - Use these to retrieve content that was generated previously without regenerating it
 

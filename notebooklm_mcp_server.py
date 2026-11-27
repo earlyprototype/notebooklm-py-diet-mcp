@@ -27,15 +27,17 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 from notebooklm import AudioFormat, AudioLength, NotebookLMClient, QuizDifficulty, QuizQuantity
+from notebooklm.paths import get_storage_path
 
 ACTIVE_PROFILE_PATH = Path.home() / ".notebooklm-active.json"
+_PROFILE_AWARE_STORAGE = "profile" in inspect.signature(get_storage_path).parameters
 
 DEFAULT_PROFILES = {
     "personal": ".notebooklm",
@@ -50,6 +52,31 @@ def _resolve_profile_dir(name: str) -> Path:
         return Path(name)
     suffix = DEFAULT_PROFILES.get(name.lower(), f".notebooklm-{name.lower()}")
     return Path.home() / suffix
+
+
+def _storage_path(home: Path) -> Path:
+    """Resolve the CLI's storage layout without changing the running client's home."""
+    legacy = home / "storage_state.json"
+    if not _PROFILE_AWARE_STORAGE:
+        return legacy
+
+    # The SDK resolver only accepts a process-wide home. Read the target home's
+    # default when resolving a different account for discovery or switching.
+    profile = os.environ.get("NOTEBOOKLM_PROFILE")
+    if not profile:
+        with suppress(OSError, ValueError):
+            config = json.loads((home / "config.json").read_text(encoding="utf-8"))
+            if isinstance(config, dict) and isinstance(config.get("default_profile"), str):
+                profile = config["default_profile"]
+    profile = profile or "default"
+    profiles = (home / "profiles").resolve()
+    directory = (profiles / profile).resolve()
+    if directory == profiles or not directory.is_relative_to(profiles):
+        raise ValueError("Invalid SDK profile directory")
+    storage = directory / legacy.name
+    if profile == "default" and not storage.exists() and legacy.exists():
+        return legacy
+    return storage
 
 
 def _read_active_profile() -> str | None:
@@ -77,11 +104,12 @@ def _current_profile_name() -> str:
 
     home = os.environ.get("NOTEBOOKLM_HOME", "")
     if home:
-        folder = os.path.basename(os.path.expanduser(home))
-        for name, suffix in DEFAULT_PROFILES.items():
-            if folder == suffix:
+        directory = Path(home).expanduser().resolve()
+        for name in DEFAULT_PROFILES:
+            if _resolve_profile_dir(name) == directory:
                 return name
-        return folder.replace(".notebooklm-", "").replace(".notebooklm", "personal")
+        name = directory.name.removeprefix(".notebooklm-")
+        return name if _resolve_profile_dir(name) == directory else str(directory)
 
     return "personal"
 
@@ -92,6 +120,14 @@ class AppContext:
 
     client: NotebookLMClient | None
     profile: str
+    login_locks: dict[Path, asyncio.Lock] = field(default_factory=dict)
+    switch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def login_lock(self, profile: str) -> asyncio.Lock:
+        return self.login_locks.setdefault(_resolve_profile_dir(profile).resolve(), asyncio.Lock())
+
+    def is_current(self, profile: str, client: NotebookLMClient | None) -> bool:
+        return self.profile == profile and self.client is client
 
 
 def _find_cli() -> Path | None:
@@ -141,13 +177,13 @@ async def _run_login(profile: str, ctx: Context | None = None) -> bool:
     except Exception:
         return False
 
-    storage_file = target_dir / "storage_state.json"
-    return storage_file.exists() and process.returncode == 0
+    storage_file = _storage_path(target_dir)
+    return process.returncode == 0 and storage_file.is_file()
 
 
 async def _create_client(profile: str) -> NotebookLMClient:
     """Create and initialise a NotebookLM client for the given profile."""
-    storage = _resolve_profile_dir(profile) / "storage_state.json"
+    storage = _storage_path(_resolve_profile_dir(profile))
     client = await NotebookLMClient.from_storage(path=str(storage))
     if hasattr(client, "__aenter__"):
         await client.__aenter__()
@@ -157,8 +193,8 @@ async def _create_client(profile: str) -> NotebookLMClient:
 async def _ensure_authenticated(
     app: "AppContext",
     ctx: Context,
-) -> bool:
-    """Test the current session and re-authenticate if expired.
+) -> NotebookLMClient | None:
+    """Return the client authenticated for the account selected at entry.
 
     Handles three cases:
     1. No client at all -- triggers login.
@@ -170,7 +206,7 @@ async def _ensure_authenticated(
     if previous_client is not None:
         try:
             await previous_client.notebooks.list()
-            return True
+            return previous_client if app.is_current(profile, previous_client) else None
         except Exception:
             pass
 
@@ -181,24 +217,30 @@ async def _ensure_authenticated(
     else:
         await ctx.info("Session expired. Launching browser for re-authentication...")
 
-    success = await _run_login(profile, ctx)
-    if not success:
-        await ctx.error("Automatic re-authentication failed. Please run 'notebooklm login' manually in your terminal.")
-        return False
+    async with app.login_lock(profile):
+        if not app.is_current(profile, previous_client):
+            return None
+        success = await _run_login(profile, ctx)
+        if not success:
+            await ctx.error(
+                "Automatic re-authentication failed. Please run 'notebooklm login' manually in your terminal."
+            )
+            return None
 
-    new_client = await _create_client(profile)
-    if app.profile != profile or app.client is not previous_client:
-        # A switch or another login finished while we were authenticating.
-        with suppress(Exception):
-            await new_client.__aexit__(None, None, None)
-        return False
+        if not app.is_current(profile, previous_client):
+            return None
+        new_client = await _create_client(profile)
+        if not app.is_current(profile, previous_client):
+            with suppress(Exception):
+                await new_client.__aexit__(None, None, None)
+            return None
 
-    app.client = new_client
-    if previous_client is not None:
-        with suppress(Exception):
-            await previous_client.__aexit__(None, None, None)
+        app.client = new_client
+        if previous_client is not None:
+            with suppress(Exception):
+                await previous_client.__aexit__(None, None, None)
     await ctx.info("Authentication successful. Resuming operation.")
-    return True
+    return new_client if app.is_current(profile, new_client) else None
 
 
 @asynccontextmanager
@@ -207,10 +249,10 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     profile = _current_profile_name()
     profile_dir = _resolve_profile_dir(profile)
     os.environ["NOTEBOOKLM_HOME"] = str(profile_dir)
-    storage_file = profile_dir / "storage_state.json"
+    storage_file = _storage_path(profile_dir)
 
     client = None
-    if storage_file.exists():
+    if storage_file.is_file():
         try:
             client = await _create_client(profile)
         except Exception:
@@ -229,6 +271,15 @@ mcp = FastMCP("NotebookLM", lifespan=app_lifespan)
 # HTTPX request logs and HTTP Core traces can contain signed artifact URLs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _omit_download_url(record: logging.LogRecord) -> bool:
+    # Both SDK layouts include the host or signed URL in these records.
+    return not str(record.msg).startswith(("Downloaded %s", "Download failed for %s"))
+
+
+for _logger in ("notebooklm._artifacts", "notebooklm._artifact.downloads"):
+    logging.getLogger(_logger).addFilter(_omit_download_url)
 
 
 # ============================================================================
@@ -624,18 +675,30 @@ def _validate_binary(path: Path, fmt: str) -> None:
     raise _ArtifactError(message)
 
 
-async def _download_artifact(artifacts, notebook_id: str, artifact_id: str, kind: str, path: str, fmt: str):
+async def _download_artifact(
+    app: AppContext, client: NotebookLMClient, notebook_id: str, artifact_id: str, kind: str, path: str, fmt: str
+):
     if not artifact_id:
         raise _ArtifactError("A download requires an artifact ID")
-    download = getattr(artifacts, f"download_{kind}")
+    download = getattr(client.artifacts, f"download_{kind}")
     options = {"output_format": fmt} if kind in ("quiz", "flashcards") else {}
+    binary = kind in ("audio", "video", "slide_deck", "infographic")
+    if binary and not _PROFILE_AWARE_STORAGE and "NOTEBOOKLM_AUTH_JSON" in os.environ:
+        raise _ArtifactError("Unset NOTEBOOKLM_AUTH_JSON so the SDK downloads with the selected profile's cookies")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=destination.parent) as directory:
         staged = Path(directory) / f"download.{fmt}"
-        await download(notebook_id, str(staged), artifact_id=artifact_id, **options)
-        if kind in ("audio", "video", "slide_deck", "infographic"):
+        # SDK 0.3.2 reads cookies from NOTEBOOKLM_HOME inside the download.
+        # A login can rewrite that file and a switch can change its directory.
+        async with app.login_lock(app.profile), app.switch_lock:
+            if app.client is not client:
+                raise _ArtifactError("Active account changed before download")
+            await download(notebook_id, str(staged), artifact_id=artifact_id, **options)
+        if binary:
             _validate_binary(staged, fmt)
+        if os.name == "posix":
+            staged.chmod(0o600)
         staged.replace(destination)
 
 
@@ -675,19 +738,22 @@ async def generate_and_download(
         Dictionary with generation and download status
     """
     app = ctx.request_context.lifespan_context
-    if not await _ensure_authenticated(app, ctx):
-        return {"error": "Authentication failed. Please check the logs."}
+    client = await _ensure_authenticated(app, ctx)
+    if client is None:
+        return {"error": "Authentication failed or the active account changed."}
 
     artifact_type = artifact_type.lower().replace(" ", "_")
     valid_types = {"report", "audio", "slide_deck", "quiz", "infographic"}
     if artifact_type not in valid_types:
         return {"error": f"Unsupported artifact type: {artifact_type}. Use one of: {', '.join(sorted(valid_types))}"}
 
-    artifacts = app.client.artifacts
+    artifacts = client.artifacts
     await ctx.info(f"Generating {artifact_type}...")
 
     artifact_id = None
     try:
+        if app.client is not client:
+            raise _ArtifactError("Active account changed before generation")
         fmt = _download_format(artifact_type, output_path, quiz_output_format if artifact_type == "quiz" else "")
         gen_kwargs: dict = {}
         if instructions:
@@ -720,7 +786,7 @@ async def generate_and_download(
             raise _generation_failure(f"Artifact {artifact_id} did not complete", completed.error)
 
         await ctx.info(f"Downloading {artifact_type} to {output_path}...")
-        await _download_artifact(artifacts, notebook_id, artifact_id, artifact_type, output_path, fmt)
+        await _download_artifact(app, client, notebook_id, artifact_id, artifact_type, output_path, fmt)
 
         return {
             "artifact_type": artifact_type,
@@ -790,18 +856,20 @@ async def export_artifact(
         Dictionary with export status
     """
     app = ctx.request_context.lifespan_context
-    if not await _ensure_authenticated(app, ctx):
-        return {"error": "Authentication failed. Please check the logs."}
+    client = await _ensure_authenticated(app, ctx)
+    if client is None:
+        return {"error": "Authentication failed or the active account changed."}
 
-    artifacts = app.client.artifacts
     await ctx.info(f"Exporting artifact to: {output_path}")
     try:
-        artifact = await artifacts.get(notebook_id, artifact_id)
+        if app.client is not client:
+            raise _ArtifactError("Active account changed before export")
+        artifact = await client.artifacts.get(notebook_id, artifact_id)
         if artifact is None:
             return {"error": f"Artifact {artifact_id} not found"}
         kind = artifact.kind.value
         fmt = _download_format(kind, output_path, export_format)
-        await _download_artifact(artifacts, notebook_id, artifact_id, kind, output_path, fmt)
+        await _download_artifact(app, client, notebook_id, artifact_id, kind, output_path, fmt)
         return {"artifact_id": artifact_id, "output_path": output_path, "success": True}
     except Exception as e:
         return {"artifact_id": artifact_id, "error": _artifact_error("export_artifact", e)}
@@ -864,15 +932,17 @@ async def research_and_import(
     """
     app = ctx.request_context.lifespan_context
     profile = app.profile
-    if not await _ensure_authenticated(app, ctx):
+    client = await _ensure_authenticated(app, ctx)
+    if app.profile != profile:
+        return {"query": query, "imported": 0, "error": "Active research profile changed before start"}
+    if client is None:
         return {"error": "Authentication failed. Please check the logs."}
 
-    client = app.client
     await ctx.info(f"Researching: {query}")
     if max_results < 0:
         return {"query": query, "imported": 0, "error": "max_results must be nonnegative"}
     try:
-        if app.client is not client or app.profile != profile:
+        if not app.is_current(profile, client):
             return {"query": query, "imported": 0, "error": "Active research profile changed before start"}
         task = await client.research.start(notebook_id, query, source=source)
         task_id = _research_field(task, "task_id")
@@ -888,7 +958,7 @@ async def research_and_import(
         to_import = results[:max_results]
         if to_import:
             await ctx.info(f"Importing {len(to_import)} sources...")
-            if app.client is not client or app.profile != profile:
+            if not app.is_current(profile, client):
                 return {"query": query, "imported": 0, "error": "Active research profile changed before import"}
             import_result = await client.research.import_sources(notebook_id, task_id=task_id, sources=to_import)
         else:
@@ -929,11 +999,11 @@ async def get_account_info(ctx: Context[ServerSession, AppContext]) -> dict:
     available = {}
     for name, suffix in DEFAULT_PROFILES.items():
         path = Path.home() / suffix
-        if path.exists() and (path / "storage_state.json").exists():
+        if path.is_dir() and _storage_path(path).is_file():
             available[name] = str(path)
 
     for p in Path.home().glob(".notebooklm-*"):
-        if p.is_dir() and (p / "storage_state.json").exists():
+        if p.is_dir() and _storage_path(p).is_file():
             label = p.name.replace(".notebooklm-", "")
             if label not in available:
                 available[label] = str(p)
@@ -963,8 +1033,8 @@ async def switch_account(
 ) -> dict:
     """Switch the active NotebookLM account to a different Google profile.
 
-    The change takes effect immediately and is persisted across server
-    restarts. Use get_account_info to see available profiles.
+    A switch waits for an active download to finish and persists across
+    server restarts. Use get_account_info to see available profiles.
 
     Args:
         profile: Profile name to switch to (e.g. 'work', 'personal',
@@ -975,9 +1045,9 @@ async def switch_account(
     """
     app = ctx.request_context.lifespan_context
     target_dir = _resolve_profile_dir(profile)
-    storage_file = target_dir / "storage_state.json"
+    storage_file = _storage_path(target_dir)
 
-    if not storage_file.exists():
+    if not storage_file.is_file():
         return {
             "success": False,
             "error": f"No credentials found for profile '{profile}' at {target_dir}",
@@ -985,24 +1055,23 @@ async def switch_account(
         }
 
     await ctx.info(f"Switching from '{app.profile}' to '{profile}'...")
-    new_client = await _create_client(profile)
-    try:
-        _write_active_profile(profile)
-    except Exception:
-        with suppress(Exception):
-            await new_client.__aexit__(None, None, None)
-        raise
+    async with app.switch_lock:
+        new_client = await _create_client(profile)
+        try:
+            _write_active_profile(profile)
+        except Exception:
+            with suppress(Exception):
+                await new_client.__aexit__(None, None, None)
+            raise
 
-    # SDK 0.3.2 reads download cookies from NOTEBOOKLM_HOME at request time.
-    # Publish the credential directory and client together before yielding.
-    previous = app.profile
-    previous_client = app.client
-    os.environ["NOTEBOOKLM_HOME"] = str(target_dir)
-    app.client = new_client
-    app.profile = profile
-    if previous_client is not None:
-        with suppress(Exception):
-            await previous_client.__aexit__(None, None, None)
+        previous = app.profile
+        previous_client = app.client
+        os.environ["NOTEBOOKLM_HOME"] = str(target_dir)
+        app.client = new_client
+        app.profile = profile
+        if previous_client is not None:
+            with suppress(Exception):
+                await previous_client.__aexit__(None, None, None)
 
     await ctx.info(f"Switched to '{profile}' account")
 
@@ -1032,17 +1101,16 @@ async def create_profile(
     Returns:
         Dictionary with the profile status and next steps.
     """
+    app = ctx.request_context.lifespan_context
     target_dir = _resolve_profile_dir(profile)
-    storage_file = target_dir / "storage_state.json"
-
-    if storage_file.exists():
-        return {
-            "success": False,
-            "error": f"Profile '{profile}' already exists at {target_dir}",
-            "hint": "Use switch_account to switch to it, or choose a different name.",
-        }
-
-    success = await _run_login(profile, ctx)
+    async with app.login_lock(profile):
+        if _storage_path(target_dir).is_file():
+            return {
+                "success": False,
+                "error": f"Profile '{profile}' already exists at {target_dir}",
+                "hint": "Use switch_account to switch to it, or choose a different name.",
+            }
+        success = await _run_login(profile, ctx)
 
     if not success:
         return {

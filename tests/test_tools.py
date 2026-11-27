@@ -8,7 +8,9 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import wave
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +22,8 @@ import httpx
 import pytest
 from mcp.server.fastmcp.utilities.logging import configure_logging
 from notebooklm import ArtifactType, AudioFormat, AudioLength, GenerationStatus, QuizDifficulty, QuizQuantity
+from notebooklm._logging import configure_logging as configure_sdk_logging
+from notebooklm.paths import get_storage_path
 
 from notebooklm_mcp_server import (
     add_sources,
@@ -425,6 +429,87 @@ async def test_binary_export_validates_before_replace(mock_ctx, mock_client, tmp
             assert "AAC" in result["error"]
         assert output.read_bytes() == b"previous contents"
     assert list(tmp_path.iterdir()) == [output]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permission bits")
+async def test_replacing_private_report_preserves_mode(mock_ctx, mock_client, tmp_path):
+    output = tmp_path / "report.md"
+    output.write_text("previous", encoding="utf-8")
+    output.chmod(0o600)
+
+    def download(notebook_id, output_path, artifact_id):
+        staged = Path(output_path)
+        staged.write_text("replacement", encoding="utf-8")
+        staged.chmod(0o644)
+
+    mock_client.artifacts.get.return_value = SimpleNamespace(id="selected", kind=ArtifactType.REPORT)
+    mock_client.artifacts.download_report.side_effect = download
+    result = await export_artifact("notebook", "selected", str(output), ctx=mock_ctx)
+    assert result["success"]
+    assert output.read_text(encoding="utf-8") == "replacement"
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+async def test_media_download_uses_profile_credentials_with_inline_auth_set(
+    mock_ctx, mock_client, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path / ".notebooklm-test"))
+    mock_client.artifacts.get.return_value = SimpleNamespace(kind=ArtifactType.SLIDE_DECK)
+    output = tmp_path / "deck.pdf"
+    result = await export_artifact("notebook", "selected", str(output), ctx=mock_ctx)
+    # The legacy downloader gives inline cookies precedence over the profile.
+    if get_storage_path().parent == tmp_path / ".notebooklm-test":
+        assert "NOTEBOOKLM_AUTH_JSON" in result["error"]
+        mock_client.artifacts.download_slide_deck.assert_not_awaited()
+        assert not output.exists()
+    else:
+        assert result["success"]
+        assert output.is_file()
+
+
+async def test_successful_sdk_download_omits_signed_url(mock_ctx, mock_client, tmp_path, monkeypatch, capsys, caplog):
+    url = "https://fixture.googleusercontent.com/deck?sig=synthetic"
+    with fitz.open() as doc:
+        doc.new_page()
+        pdf = doc.tobytes()
+
+    def serve(request):
+        assert str(request.url) == url
+        return httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(serve)))
+    monkeypatch.setenv("NOTEBOOKLM_LOG_LEVEL", "DEBUG")
+    monkeypatch.delenv("NOTEBOOKLM_TRANSPORT", raising=False)
+    try:
+        from notebooklm._artifact.downloads import AssetDownloadService
+    except ImportError:
+        from notebooklm._artifacts import ArtifactsAPI
+
+        monkeypatch.setattr("notebooklm._artifacts.load_httpx_cookies", httpx.Cookies)
+        download = ArtifactsAPI(Mock(), Mock())._download_url
+    else:
+        download = AssetDownloadService(cookie_loader=lambda _: httpx.Cookies()).download_url
+
+    async def download_deck(notebook_id, output_path, artifact_id):
+        return await download(url, output_path)
+
+    mock_client.artifacts.download_slide_deck.side_effect = download_deck
+    output = tmp_path / "slides.pdf"
+    logger = logging.getLogger("notebooklm")
+    with (
+        patch.object(logging.getLogger(), "handlers", []),
+        patch.object(logger, "handlers", []),
+        caplog.at_level(logging.DEBUG, logger=logger.name),
+    ):
+        configure_sdk_logging()
+        assert logger.isEnabledFor(logging.DEBUG)
+        result = await generate_and_download("notebook", "slide_deck", str(output), ctx=mock_ctx)
+    assert result["success"], result
+    assert output.read_bytes() == pdf
+    stderr = capsys.readouterr().err
+    assert "fixture.googleusercontent.com" not in stderr
+    assert "sig=synthetic" not in stderr
 
 
 @pytest.mark.parametrize("operation", ["generate_and_download", "export_artifact"])
