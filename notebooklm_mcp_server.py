@@ -7,7 +7,7 @@ other MCP-compatible clients.
 Built on top of notebooklm-py: https://github.com/teng-lin/notebooklm-py
 
 Requires:
-    - notebooklm-py >= 0.3.2
+    - notebooklm-py >= 0.8.6
     - mcp[cli] >= 1.0.0
     - A valid NotebookLM authentication session (run: notebooklm login)
 
@@ -19,7 +19,6 @@ Account selection:
 """
 
 import asyncio
-import inspect
 import json
 import os
 import subprocess
@@ -692,18 +691,10 @@ async def research_and_import(
         if not task_id:
             return {"query": query, "error": "Research did not return a task ID."}
 
-        poll = app.client.research.poll
-        poll_kwargs = {"task_id": task_id} if "task_id" in inspect.signature(poll).parameters else {}
         poll_limit = 60
         for _ in range(poll_limit):
             await asyncio.sleep(2)
-            poll_result = await poll(notebook_id, **poll_kwargs)
-            # Notebook-wide polls can put a newer task at the top level.
-            tasks = _research_field(poll_result, "tasks")
-            if not poll_kwargs and tasks is not None:
-                poll_result = next((entry for entry in tasks if _research_field(entry, "task_id") == task_id), None)
-                if poll_result is None:
-                    continue
+            poll_result = await app.client.research.poll(notebook_id, task_id=task_id)
             polled_id = _research_field(poll_result, "task_id")
             if polled_id is not None and polled_id != task_id:
                 continue
@@ -719,7 +710,10 @@ async def research_and_import(
                 reason = _research_field(poll_result, "termination_reason") or status or "missing status"
                 return {"query": query, "error": f"Research task {task_id} did not complete ({reason})."}
         else:
-            return {"query": query, "error": f"Research task {task_id} timed out after {poll_limit} polls."}
+            return {
+                "query": query,
+                "error": f"Polling task {task_id} timed out after {poll_limit} polls. Its outcome is unknown.",
+            }
 
         results = _research_field(poll_result, "sources")
         if results is None:

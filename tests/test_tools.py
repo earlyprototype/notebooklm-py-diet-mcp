@@ -224,6 +224,7 @@ class TestResearchAndImport:
         assert result["success"] is True
         assert result["query"] == "quantum computing"
         mock_client.research.start.assert_awaited_once()
+        mock_client.research.poll.assert_awaited_once_with("nb-1", task_id="research-1")
         mock_client.research.import_sources.assert_awaited_once()
 
     async def test_times_out_without_importing_partial_results(self, mock_ctx, mock_client):
@@ -234,6 +235,7 @@ class TestResearchAndImport:
         result = await research_and_import("nb-1", "test", ctx=mock_ctx)
 
         assert "timed out" in result["error"].lower()
+        assert "outcome is unknown" in result["error"].lower()
         assert not result.get("success")
         assert mock_client.research.poll.await_count == 60
         mock_client.research.import_sources.assert_not_awaited()
@@ -272,20 +274,7 @@ class TestResearchAndImport:
         assert result["imported"] == 1
         mock_client.research.import_sources.assert_awaited_once_with("nb-1", task_id="research-1", sources=sources[:1])
 
-    async def test_finds_completed_task_second_in_notebook_poll(self, mock_ctx, mock_client):
-        newer = {"task_id": "newer", "status": "completed", "sources": [{"url": "https://example.com/newer"}]}
-        sources = [{"url": "https://example.com/requested", "title": "Requested"}]
-        requested = {"task_id": "research-1", "status": "completed", "sources": sources}
-        mock_client.research.poll.return_value = {**newer, "tasks": [newer, requested]}
-
-        result = await research_and_import("nb-1", "test", ctx=mock_ctx)
-
-        assert result["success"] is True
-        assert result["imported"] == 1
-        mock_client.research.poll.assert_awaited_once_with("nb-1")
-        mock_client.research.import_sources.assert_awaited_once_with("nb-1", task_id="research-1", sources=sources)
-
-    async def test_ignores_unidentified_notebook_completion(self, mock_ctx, mock_client):
+    async def test_ignores_completion_without_task_id(self, mock_ctx, mock_client):
         mock_client.research.poll.return_value = {"status": "completed", "sources": [{"url": "https://example.com"}]}
 
         result = await research_and_import("nb-1", "test", ctx=mock_ctx)
@@ -325,7 +314,7 @@ class TestResearchAndImport:
         assert "confirm" in result["error"].lower()
         assert result["import_details"] == confirmed
 
-    async def test_polls_by_id_when_supported(self, mock_ctx, mock_client):
+    async def test_imports_typed_sources(self, mock_ctx, mock_client):
         source = SimpleNamespace(url="https://example.com", title="Example")
 
         async def poll(notebook_id, task_id):

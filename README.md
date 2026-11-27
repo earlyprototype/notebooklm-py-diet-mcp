@@ -93,6 +93,8 @@ Alternatively, install from `requirements.txt`:
 pip install -r requirements.txt
 ```
 
+If you're updating an existing installation, rerun either install command above. Research polling requires `notebooklm-py` 0.8.6 or later to select the requested task and report cancellation.
+
 ### 3. Install Playwright (required for first-time login and auto-reauthentication)
 
 ```bash
